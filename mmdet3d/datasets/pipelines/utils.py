@@ -2,7 +2,10 @@ import warnings
 
 import numba
 import numpy as np
-from numba import errors
+try:
+    from numba.core import errors
+except ImportError:  # Numba versions predating the core package.
+    from numba import errors
 
 from mmdet3d.core.bbox import box_np_ops
 

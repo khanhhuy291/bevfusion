@@ -1,5 +1,7 @@
 # BEVFusion
 
+Hướng dẫn chạy thử trên VM GCP: [nuScenes mini + checkpoint detection](docs/RUN_NUSCENES_MINI_VM.md).
+
 ### [website](http://bevfusion.mit.edu/) | [paper](https://arxiv.org/abs/2205.13542) | [video](https://www.youtube.com/watch?v=uCAka90si9E)
 
 ![demo](assets/demo.gif)
