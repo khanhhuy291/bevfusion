@@ -132,6 +132,9 @@ dmypy.json
 models/*
 data/*
 runs/*
+pretrained/
+outputs/
+.DS_Store
 
 # torch hipify generated files
 *_hip.*
