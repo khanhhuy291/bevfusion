@@ -144,6 +144,98 @@ refine tốt cho nuScenes. Giảm batch cho T4, không đổi kiến trúc tùy 
 4. Nạp checkpoint đủ key, chạy GRM/PRM; ghép và kiểm tra trước/sau.
 5. Thêm CRM, exporter và đánh giá trên cùng dữ liệu.
 
-Giữ môi trường BEVFusion và DetZero tách riêng; trao đổi JSON và NumPy pickle
-thay vì class Python của detector. Người dùng tự chạy các bước trên VM như đã
-thống nhất; hiện chưa có lệnh tích hợp end-to-end vì adapter chưa được viết.
+---
+
+## 7. Trạng thái triển khai hoàn tất (DetZero-main-2)
+
+Pipeline đã được hiện thực hóa và kiểm thử thành công end-to-end:
+
+1. **Adapter & Geometry Bridge (`DetZero-main-2/integration/bridge.py`):**
+   - Đọc kết quả detection từ `results_nusc.json` của BEVFusion mà không cần phụ thuộc môi trường PyTorch BEVFusion.
+   - Đồng bộ timestamp thực tế và ma trận biến đổi tọa độ ego/sensor sang hệ toạ độ global.
+   - Ánh xạ các lớp nuScenes sang 3 lớp mục tiêu của DetZero (`Vehicle`, `Pedestrian`, `Cyclist`).
+   - Xử lý đọc LiDAR point cloud `.pcd.bin` (5 kênh) và crop điểm chính xác quanh từng box 3D.
+   - Mã hóa đặc trưng cho GRM (`geo_query_points`, `geo_memory_points`, `geo_query_boxes`) và PRM (`pos_query_points`, `pos_memory_points`, `pos_trajectory`, `padding_mask`).
+   - Ghép box tinh chỉnh (size từ GRM + vị trí & hướng từ PRM) và xuất lại đúng schema NuScenes.
+
+2. **DetZero Tracking thích ứng nuScenes (`DetZero-main-2/tracking/`):**
+   - File cấu hình riêng: `nuscenes_detzero_track.yaml` với tần số 2 Hz (`DELTA_T: 0.5`, `LEAST_AGE: 2`).
+   - Cập nhật delta-time động theo timestamp thật trong Kalman Filter cho cả forward pass và reverse tracking.
+   - Tối ưu hóa vận tốc theo độ biến thiên thời gian thực tế $\Delta t$ thay vì nhân cố định 10.
+   - Hỗ trợ chạy trên cả GPU (CUDA) và CPU (dùng Shapely exact polygon intersection fallback).
+
+3. **Refining GRM + PRM độc lập (`DetZero-main-2/refining/`):**
+   - Tách rời hoàn toàn khỏi cấu trúc dataset Waymo; nạp cấu hình model trực tiếp từ YAML.
+   - Tự động nạp đủ 6 checkpoint:
+     - `vehicle_grm_model.pth` + `vehicle_prm_model.pth`
+     - `pedestrian_grm_model.pth` + `pedestrian_prm_model.pth`
+     - `cyclist_grm_model.pth` + `cyclist_prm_model.pth`
+   - Bỏ CRM theo yêu cầu (giữ nguyên độ tin cậy detector confidence).
+
+4. **Script chạy toàn bộ quy trình (`DetZero-main-2/integration/run_pipeline.py`):**
+   - Thực thi trọn vẹn 5 bước: `Prepare -> Track -> Crop LiDAR -> Refine (GRM+PRM) -> Export`.
+   - Xuất 2 file kết quả:
+     - `results_nusc_detzero_refined.json`: Kết quả detection sau refine để đánh giá mAP / NDS.
+     - `results_nusc_detzero_tracking.json`: Kết quả tracking có `tracking_id` theo chuẩn NuScenes tracking.
+
+---
+
+## 8. Hướng dẫn chạy trên VM GPU (`detzero-gpu-01`)
+
+### Bước 1: Đẩy mã nguồn từ máy Local lên GitHub bằng Git
+
+Toàn bộ 6 checkpoint (.pth ~14-16MB/file, tổng ~89MB) và các module đã được cấu hình hợp lệ để commit qua Git (không vượt ngưỡng 100MB của GitHub):
+
+```bash
+git add DetZero-main-2 docs/BEVFUSION_DETZERO_INTEGRATION.md
+git commit -m "feat: Integrate DetZero tracking and GRM/PRM refining with BEVFusion"
+git push origin fix/nuscenes-mini-depth-lss
+```
+
+### Bước 2: Kéo mã nguồn về VM và kích hoạt môi trường
+
+Trên máy ảo GPU (`hngtram11@detzero-gpu-01`):
+
+```bash
+cd ~/bevfusion
+git pull origin fix/nuscenes-mini-depth-lss
+conda activate detzero # hoặc môi trường DetZero của bạn
+```
+
+### Bước 3: Chạy pipeline nối BEVFusion sang DetZero Tracking & Refining
+
+```bash
+python DetZero-main-2/integration/run_pipeline.py \
+    --results_path outputs/mini-eval/results_nusc.json \
+    --data_root data/nuscenes \
+    --version v1.0-mini \
+    --tracking_cfg DetZero-main-2/tracking/tools/cfgs/tk_model_cfgs/nuscenes_detzero_track.yaml \
+    --checkpoint_dir DetZero-main-2/checkpoints \
+    --output_dir outputs/detzero_refined \
+    --device cuda
+```
+
+*Ghi chú: Nếu chỉ muốn kiểm tra tracking trước khi chạy refining, thêm cờ `--skip_refining`.*
+
+### Bước 4: Chấm điểm đánh giá kết quả sau tinh chỉnh (Evaluation)
+
+**Đánh giá Detection (mAP, NDS sau refine):**
+```bash
+python -m nuscenes.eval.detection.evaluate \
+    --result_path outputs/detzero_refined/results_nusc_detzero_refined.json \
+    --output_dir outputs/detzero_refined/eval_detection \
+    --eval_set val \
+    --dataroot data/nuscenes \
+    --version v1.0-mini
+```
+
+**Đánh giá Tracking (AMOTA, AMOTP, MOTA, MOTP):**
+```bash
+python -m nuscenes.eval.tracking.evaluate \
+    outputs/detzero_refined/results_nusc_detzero_tracking.json \
+    --output_dir outputs/detzero_refined/eval_tracking \
+    --eval_set val \
+    --dataroot data/nuscenes \
+    --version v1.0-mini
+```
+
