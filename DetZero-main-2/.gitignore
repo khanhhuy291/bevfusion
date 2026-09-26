@@ -3,7 +3,7 @@
 **egg-info**
 
 data/
-
+checkpoints/
 **log**
 
 *.ipynb_checkpoints/
@@ -13,7 +13,6 @@ data/
 venv/
 *.so
 *.pth
-!checkpoints/*.pth
 *.pkl
 *.zip
 *.bin

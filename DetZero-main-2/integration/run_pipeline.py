@@ -237,6 +237,8 @@ def export_tracking_results(prepared: Dict[str, Any], tracks: Dict[str, Dict[str
     tracking_output = copy.deepcopy(prepared["original"])
     tracking_results = {token: [] for token in tracking_output["results"]}
 
+    VALID_TRACKING_NAMES = {'bicycle', 'bus', 'car', 'motorcycle', 'pedestrian', 'trailer', 'truck'}
+
     for tid, track in tracks.items():
         boxes = refined_boxes.get(tid, track["boxes_global"][:, :7])
         cls_name = track["nusc_name"] if "nusc_name" in track else track["name"]
@@ -248,6 +250,27 @@ def export_tracking_results(prepared: Dict[str, Any], tracks: Dict[str, Dict[str
             token = frame_data["sample_token"]
             score = float(track["score"][i])
             box = boxes[i]
+            source = int(track["source_index"][i])
+
+            # Determine nuScenes tracking category
+            tracking_name = None
+            if source >= 0 and source < len(prepared["original"]["results"][token]):
+                orig_name = prepared["original"]["results"][token][source].get("detection_name", "")
+                if orig_name in VALID_TRACKING_NAMES:
+                    tracking_name = orig_name
+
+            if tracking_name is None:
+                # Map from DetZero class
+                if cls_name == "Pedestrian":
+                    tracking_name = "pedestrian"
+                elif cls_name == "Cyclist":
+                    tracking_name = "bicycle"
+                elif cls_name == "Vehicle":
+                    tracking_name = "car"
+                elif str(cls_name).lower() in VALID_TRACKING_NAMES:
+                    tracking_name = str(cls_name).lower()
+                else:
+                    tracking_name = "car"
 
             # Convert to nuScenes record format
             yaw = float(bridge.wrap_yaw(box[6]))
@@ -259,7 +282,7 @@ def export_tracking_results(prepared: Dict[str, Any], tracks: Dict[str, Dict[str
                 "rotation": quat,
                 "velocity": [float(track["boxes_global"][i, 7]), float(track["boxes_global"][i, 8])],
                 "tracking_id": str(tid),
-                "tracking_name": str(cls_name),
+                "tracking_name": tracking_name,
                 "tracking_score": score
             }
             tracking_results[token].append(tracking_rec)
