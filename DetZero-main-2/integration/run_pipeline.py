@@ -270,34 +270,30 @@ def export_tracking_results(prepared: Dict[str, Any], tracks: Dict[str, Dict[str
 
     for tid, track in tracks.items():
         boxes = refined_boxes.get(tid, track["boxes_global"][:, :7])
-        cls_name = track["nusc_name"] if "nusc_name" in track else track["name"]
-        if isinstance(cls_name, (list, np.ndarray)):
-            cls_name = cls_name[0]
+        track_cls = track["name"]
+        if isinstance(track_cls, (list, np.ndarray)):
+            track_cls = track_cls[0]
 
         # Determine consistent category for the entire track from source detections
+        # Enforce that category MUST be compatible with track_cls (e.g. Vehicle can never be pedestrian)
+        compatible_names = {k for k, v in bridge.CLASS_MAP.items() if v == track_cls}
+
         track_category = None
-        for s_idx, f_idx in zip(track["source_index"], track["sample_idx"]):
-            s_idx = int(s_idx)
-            if s_idx >= 0:
-                frm = prepared["frames"][track["sequence_name"]][str(f_idx)]
-                tkn = frm["sample_token"]
-                if s_idx < len(prepared["original"]["results"][tkn]):
-                    det_n = prepared["original"]["results"][tkn][s_idx].get("detection_name", "")
-                    if det_n in VALID_TRACKING_NAMES:
-                        track_category = det_n
-                        break
+        if "source_index" in track:
+            for s_idx, f_idx in zip(track["source_index"], track["sample_idx"]):
+                s_idx = int(s_idx)
+                if s_idx >= 0:
+                    frm = prepared["frames"][track["sequence_name"]][str(f_idx)]
+                    tkn = frm["sample_token"]
+                    if s_idx < len(prepared["original"]["results"][tkn]):
+                        det_n = prepared["original"]["results"][tkn][s_idx].get("detection_name", "")
+                        if det_n in compatible_names:
+                            track_category = det_n
+                            break
 
         if track_category is None:
-            if cls_name == "Pedestrian":
-                track_category = "pedestrian"
-            elif cls_name == "Cyclist":
-                track_category = "bicycle"
-            elif cls_name == "Vehicle":
-                track_category = "car"
-            elif str(cls_name).lower() in VALID_TRACKING_NAMES:
-                track_category = str(cls_name).lower()
-            else:
-                track_category = "car"
+            default_map = {"Vehicle": "car", "Pedestrian": "pedestrian", "Cyclist": "bicycle"}
+            track_category = default_map.get(track_cls, "car")
 
         for i, frm_idx in enumerate(track["sample_idx"]):
             frame_data = prepared["frames"][track["sequence_name"]][str(frm_idx)]

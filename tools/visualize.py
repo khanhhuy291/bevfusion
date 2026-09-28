@@ -81,8 +81,10 @@ def global_to_lidar_boxes(preds_for_token, info, object_classes):
     scores = np.array(scores)
     labels = np.array(labels)
 
-    # Convert centroid Z to bottom-center Z for LiDARInstance3DBoxes
-    locs[:, 2] -= dims[:, 2] / 2.0
+    # BEVFusion export stores translation[2] at roof/top-half elevation (z_centroid + h / 2)
+    # due to LiDARInstance3DBoxes.gravity_center adding h/2. To pass true bottom-center
+    # to LiDARInstance3DBoxes for ground-level rendering, subtract the full box height h.
+    locs[:, 2] -= dims[:, 2]
     box_tensor = np.concatenate([locs, dims, yaws, np.zeros((len(locs), 2))], axis=-1)
     bboxes = LiDARInstance3DBoxes(box_tensor, box_dim=9)
 

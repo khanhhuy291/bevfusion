@@ -57,8 +57,12 @@ def render_camera_view(img: np.ndarray, boxes: list, cam_cs: dict, cam_pose: dic
 
     for item in boxes:
         name = item.get('tracking_name', item.get('detection_name', 'car'))
+        center = np.array(item['translation'], dtype=float)
+        # BEVFusion export stores translation[2] at (z_centroid + h / 2).
+        # Convert to true centroid for NuScenes Box wireframe rendering:
+        center[2] -= float(item['size'][2]) / 2.0
         b = Box(
-            item['translation'], item['size'], Quaternion(item['rotation']),
+            center, item['size'], Quaternion(item['rotation']),
             name=name, score=item.get('tracking_score', item.get('detection_score', -1))
         )
 
