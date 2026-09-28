@@ -1,394 +1,271 @@
 #!/usr/bin/env python3
-"""End-to-end integration pipeline: BEVFusion detection -> DetZero tracking -> DetZero refining (GRM + PRM) -> NuScenes export."""
-
+"""Offline detection -> class-preserving tracking -> optional GRM/PRM, without CRM."""
 import argparse
+from collections import Counter, defaultdict
 import copy
+import hashlib
+import inspect
 import json
-import os
-import sys
 from pathlib import Path
-from typing import Dict, List, Any
+import pickle
+import subprocess
+import sys
 
 import numpy as np
 import torch
+import yaml
 from easydict import EasyDict
 
-# Ensure DetZero subpackages can be imported
 DETZERO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(DETZERO_ROOT))
-sys.path.insert(0, str(DETZERO_ROOT / "tracking"))
-sys.path.insert(0, str(DETZERO_ROOT / "refining"))
-sys.path.insert(0, str(DETZERO_ROOT / "utils"))
-
+for directory in [DETZERO_ROOT, DETZERO_ROOT / 'tracking', DETZERO_ROOT / 'refining', DETZERO_ROOT / 'utils']:
+    sys.path.insert(0, str(directory))
 from integration import bridge
 from detzero_utils.config_utils import cfg_from_yaml_file
 from detzero_track.models.detzero_tracker import DetZeroTracker
 from detzero_refine.models import build_network
 
+TRACKING_CLASSES = {'car', 'truck', 'bus', 'trailer', 'pedestrian', 'motorcycle', 'bicycle'}
+
 
 class StandaloneDataset:
-    """Minimal dataset stub for loading refining models without Waymo data dependencies."""
-    def __init__(self):
-        self.tta = False
+    tta = False
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="BEVFusion to DetZero Tracking & Refining Pipeline")
-    parser.add_argument("--results_path", type=str, required=True,
-                        help="Path to BEVFusion detection output (results_nusc.json)")
-    parser.add_argument("--data_root", type=str, default="data/nuscenes",
-                        help="Path to nuScenes dataset root directory")
-    parser.add_argument("--version", type=str, default="v1.0-mini",
-                        help="nuScenes version (e.g. v1.0-mini or v1.0-trainval)")
-    parser.add_argument("--tracking_cfg", type=str,
-                        default=str(DETZERO_ROOT / "tracking/tools/cfgs/tk_model_cfgs/nuscenes_detzero_track.yaml"),
-                        help="Tracking config file")
-    parser.add_argument("--checkpoint_dir", type=str,
-                        default=str(DETZERO_ROOT / "checkpoints"),
-                        help="Directory containing DetZero GRM and PRM checkpoints")
-    parser.add_argument("--output_dir", type=str, default="outputs/detzero_refined",
-                        help="Directory to save final refined and tracking outputs")
-    parser.add_argument("--min_score", type=float, default=0.1,
-                        help="Minimum detection confidence threshold for tracking input")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
-                        help="Device to run models on ('cuda' or 'cpu')")
-    parser.add_argument("--skip_refining", action="store_true",
-                        help="Skip refining (GRM + PRM) and only perform tracking")
-    parser.add_argument("--classes", type=str,
-                        default="car,truck,bus,trailer,construction_vehicle,pedestrian,motorcycle,bicycle",
-                        help="Comma-separated nuScenes classes to track and refine")
-    parser.add_argument("--size_policy", type=str, default="auto",
-                        choices=["auto", "detector_prior", "grm"],
-                        help="Policy for bounding box dimensions: 'auto' (preserves multi-modal detector prior for human/cyclist, checks vehicle GRM), 'detector_prior' (maintains BEVFusion multi-modal sizes across all classes), 'grm' (unconstrained GRM size prediction)")
-    return parser.parse_args()
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--results_path', required=True)
+    p.add_argument('--data_root', default='data/nuscenes')
+    p.add_argument('--version', default='v1.0-mini')
+    p.add_argument('--tracking_cfg', default=str(DETZERO_ROOT / 'tracking/tools/cfgs/tk_model_cfgs/nuscenes_detzero_track.yaml'))
+    p.add_argument('--checkpoint_dir', default=str(DETZERO_ROOT / 'checkpoints'))
+    p.add_argument('--output_dir', default='outputs/detzero_refined')
+    p.add_argument('--min_score', type=float, default=0.1)
+    p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
+    p.add_argument('--tracking-device', choices=['cpu', 'cuda'],
+                   help='Optional CPU/Shapely association while refiners run on CUDA')
+    p.add_argument('--classes', default='car,truck,bus,trailer,construction_vehicle,pedestrian,motorcycle,bicycle')
+    p.add_argument('--refinement', choices=['none', 'geometry', 'full'], default='full')
+    p.add_argument('--skip_refining', action='store_true', help='Compatibility alias for --refinement none')
+    p.add_argument('--coordinate-mode', choices=['global', 'ego'], default='global',
+                   help='ego is an explicitly uncompensated diagnostic; PRM is disabled')
+    p.add_argument('--assume-stationary', action='store_true', help='Use identity poses as global ONLY if the sensor rig is known to be stationary')
+    p.add_argument('--size_policy', choices=['auto', 'detector_prior', 'grm'], default='auto',
+                   help='auto accepts GRM within 25%% of detector median, for every selected class')
+    p.add_argument('--z-policy', choices=['center', 'preserve_bottom'], default='center')
+    p.add_argument('--intensity-mode', choices=['unit', 'raw', 'tanh'], default='unit',
+                   help='unit divides 0..255 by 255; transfer choice, not calibrated to Waymo')
+    p.add_argument('--max-gap-seconds', type=float, default=0.6)
+    p.add_argument('--allow-refine-errors', action='store_true', help='Record explicit per-track fallbacks instead of stopping on model errors')
+    return p.parse_args()
 
 
-def load_refining_models(checkpoint_dir: Path, device: str):
-    """Load the 6 GRM and PRM checkpoints for Vehicle, Pedestrian, and Cyclist."""
-    ref_cfg_root = DETZERO_ROOT / "refining/tools/cfgs/ref_model_cfgs"
-    model_types = ["Vehicle", "Pedestrian", "Cyclist"]
-    models = {"grm": {}, "prm": {}}
+def check_coordinates(prepared, coordinate_mode, refinement, assume_stationary=False):
+    if coordinate_mode == 'ego':
+        if not prepared['identity_ego_pose']:
+            raise ValueError('ego mode currently requires identity ego poses; use global for a measured trajectory')
+        if refinement == 'full':
+            raise ValueError('PRM requires a consistent world frame. Use --coordinate-mode ego --refinement geometry (or none) for diagnostics only.')
+    elif prepared['identity_ego_pose'] and not assume_stationary:
+        raise ValueError('All ego poses are identity. Supply real poses, or explicitly use --coordinate-mode ego --refinement geometry. --assume-stationary requires a verified stationary sensor rig.')
 
-    for cls_name in model_types:
-        prefix = bridge.MODEL_PREFIX[cls_name]
 
-        import yaml
-
-        # Load GRM
-        grm_cfg_file = ref_cfg_root / f"{prefix}_grm_model.yaml"
-        grm_ckpt_file = checkpoint_dir / f"{prefix}_grm_model.pth"
-        if grm_cfg_file.is_file() and grm_ckpt_file.is_file():
-            grm_raw = yaml.safe_load(grm_cfg_file.read_text())
-            grm_cfg = EasyDict(grm_raw)
-            grm_model = build_network(grm_cfg.MODEL, dataset=StandaloneDataset())
-            ckpt = torch.load(str(grm_ckpt_file), map_location="cpu", weights_only=False)
-            state = ckpt.get("model_state", ckpt)
-            grm_model.load_state_dict(state, strict=False)
-            grm_model.to(device).eval()
-            models["grm"][cls_name] = grm_model
-            print(f"[Refining] Loaded {cls_name} GRM from {grm_ckpt_file.name}")
-        else:
-            print(f"[Refining] Warning: missing GRM config or checkpoint for {cls_name}: {grm_ckpt_file}")
-
-        # Load PRM
-        prm_cfg_file = ref_cfg_root / f"{prefix}_prm_model.yaml"
-        prm_ckpt_file = checkpoint_dir / f"{prefix}_prm_model.pth"
-        if prm_cfg_file.is_file() and prm_ckpt_file.is_file():
-            prm_raw = yaml.safe_load(prm_cfg_file.read_text())
-            prm_cfg = EasyDict(prm_raw)
-            prm_model = build_network(prm_cfg.MODEL, dataset=StandaloneDataset())
-            ckpt = torch.load(str(prm_ckpt_file), map_location="cpu", weights_only=False)
-            state = ckpt.get("model_state", ckpt)
-            prm_model.load_state_dict(state, strict=False)
-            prm_model.to(device).eval()
-            models["prm"][cls_name] = prm_model
-            print(f"[Refining] Loaded {cls_name} PRM from {prm_ckpt_file.name}")
-        else:
-            print(f"[Refining] Warning: missing PRM config or checkpoint for {cls_name}: {prm_ckpt_file}")
-
+def load_refining_models(checkpoint_dir, device, class_names=None, stages=('grm', 'prm')):
+    models = {'grm': {}, 'prm': {}, 'checkpoints': {}}
+    for cls in sorted(class_names if class_names is not None else bridge.MODEL_PREFIX):
+        for stage in stages:
+            prefix = bridge.MODEL_PREFIX[cls]
+            path = Path(checkpoint_dir) / f'{prefix}_{stage}_model.pth'
+            cfg_path = DETZERO_ROOT / f'refining/tools/cfgs/ref_model_cfgs/{prefix}_{stage}_model.yaml'
+            cfg = EasyDict(yaml.safe_load(cfg_path.read_text()))
+            model = build_network(cfg.MODEL, dataset=StandaloneDataset())
+            options = {'map_location': 'cpu'}
+            if 'weights_only' in inspect.signature(torch.load).parameters:
+                options['weights_only'] = False  # User-supplied trusted local checkpoints.
+            ckpt = torch.load(str(path), **options)
+            model.load_state_dict(ckpt.get('model_state', ckpt), strict=True)
+            models[stage][cls] = model.to(device).eval()
+            models['checkpoints'][f'{cls}/{stage}'] = {'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+            print(f'[Checkpoint] {cls}/{stage}: all model keys matched', flush=True)
     return models
 
 
-def run_tracking(prepared: Dict[str, Any], tracking_cfg_path: str, device: str) -> Dict[str, Dict[str, Any]]:
-    """Run DetZero Kalman + Data Association tracker per scene."""
-    tk_cfg = EasyDict()
-    cfg_from_yaml_file(tracking_cfg_path, tk_cfg)
-    tk_cfg.MODEL.DEVICE = device
-    tk_cfg.MODEL.TRACKING.DATA_ASSOCIATION.device = device
+def run_tracking(prepared, tracking_cfg_path, device, max_gap_seconds=0.6):
+    if max_gap_seconds <= 0:
+        raise ValueError('max-gap-seconds must be positive')
+    cfg = EasyDict(); cfg_from_yaml_file(tracking_cfg_path, cfg)
+    cfg.MODEL.DEVICE = device
+    tracks = {}
+    for scene, frames in prepared['frames'].items():
+        dt = np.diff([f['timestamp'] for f in frames.values()])
+        scene_cfg = copy.deepcopy(cfg.MODEL)
+        if len(dt):
+            scene_cfg.TRACKING.FILTER.DELTA_T = float(np.median(dt))
+            scene_cfg.TRACKING.TRACK_AGE.DEATH_AGE = max(1, int(np.ceil(max_gap_seconds / np.median(dt))))
+        for name in prepared['classes']:
+            selected = {}
+            for idx, frame in frames.items():
+                selected[idx] = frame.copy()
+                mask = frame['nusc_name'] == name
+                for key in ['boxes_global', 'name', 'nusc_name', 'score', 'source_index']:
+                    selected[idx][key] = frame[key][mask].copy()
+            if not any(len(f['score']) for f in selected.values()): continue
+            result = DetZeroTracker(copy.deepcopy(scene_cfg)).forward(selected)
+            for tid, track in result.items():
+                track['sequence_name'] = scene
+                track['nusc_name'] = name
+                tracks[f'{scene}_{name}_{tid}'] = track
+        print(f'[Tracking] {scene}: {len(frames)} frames', flush=True)
+    return tracks
 
-    tracker = DetZeroTracker(tk_cfg.MODEL)
-    all_tracks = {}
 
-    for scene_id, frame_dict in prepared["frames"].items():
-        print(f"[Tracking] Processing scene {scene_id} ({len(frame_dict)} frames)...")
-        # TrackManager.forward expects frame_dict indexed by str(frame_id)
-        scene_tracks = tracker.forward(frame_dict)
-        print(f"  -> Generated {len(scene_tracks)} tracks for scene {scene_id}")
-        for tid, track_info in scene_tracks.items():
-            global_tid = f"{scene_id}_{tid}"
-            track_info["sequence_name"] = str(scene_id)
-            all_tracks[global_tid] = track_info
-
-    return all_tracks
-
-
-def collect_track_pointclouds(prepared: Dict[str, Any], tracks: Dict[str, Dict[str, Any]], data_root: Path):
-    """Load LiDAR frames and crop points within bounding boxes for each tracked object."""
-    # Group frames to read each LiDAR point cloud once per scene
-    scene_lidar_cache = {}
-
+def collect_track_pointclouds(prepared, tracks, data_root, intensity_mode='unit'):
+    # Read one cloud at a time; do not cache a complete multi-scene dataset in RAM.
+    requests = defaultdict(list)
     for tid, track in tracks.items():
-        scene_id = track["sequence_name"]
-        if isinstance(scene_id, (list, np.ndarray)):
-            scene_id = str(scene_id[0]) if len(scene_id) > 0 else str(scene_id)
-        else:
-            scene_id = str(scene_id)
-        track["sequence_name"] = scene_id
-
-        track_boxes = track["boxes_global"]
-        sample_indices = track["sample_idx"]
-
-        track_pts = []
-        for i, frm_idx in enumerate(sample_indices):
-            frame_data = prepared["frames"][scene_id][str(frm_idx)]
-            lidar_rel_path = frame_data["lidar_path"]
-            lidar_full_path = data_root / lidar_rel_path
-
-            cache_key = (scene_id, frm_idx)
-            if cache_key not in scene_lidar_cache:
-                pts_global = bridge.read_points(str(lidar_full_path), frame_data["pose"], intensity_mode="tanh")
-                scene_lidar_cache[cache_key] = pts_global
-            else:
-                pts_global = scene_lidar_cache[cache_key]
-
-            box = track_boxes[i]
-            cropped = bridge.crop_points(pts_global, box, scale=1.1)
-            track_pts.append(cropped)
-
-        track["pts"] = track_pts
-
-    print(f"[LiDAR] Extracted object point clouds for {len(tracks)} tracks.")
+        track['pts'] = [None] * len(track['sample_idx'])
+        for i, idx in enumerate(track['sample_idx']):
+            requests[(track['sequence_name'], str(idx))].append((tid, i))
+    for (scene, idx), objects in requests.items():
+        frame = prepared['frames'][scene][idx]
+        points = bridge.read_points(Path(data_root) / frame['lidar_path'], frame['pose'], intensity_mode)
+        for tid, i in objects:
+            tracks[tid]['pts'][i] = bridge.crop_points(points, tracks[tid]['boxes_global'][i], scale=1.1)
 
 
-def run_refining(tracks: Dict[str, Dict[str, Any]], models: Dict[str, Dict[str, Any]], device: str,
-                 size_policy: str = "auto") -> Dict[str, np.ndarray]:
-    """Run GRM (geometry) and PRM (position/heading) models on each track."""
-    refined_boxes = {}
-    rng = np.random.default_rng(42)
+def tensor_batch(features, device):
+    return {k: torch.from_numpy(v).to(device) if isinstance(v, np.ndarray) else v for k, v in features.items()}
 
+
+def position_chunks(track, model, device, rng):
+    """Up to 200 proposals per PRM call, with 16 context frames on either side."""
+    n = len(track['sample_idx']); output = np.empty((n, 7), dtype=np.float32)
+    for start in range(0, n, 168):
+        end = min(start + 168, n); lo, hi = max(0, start-16), min(n, end+16)
+        chunk = {k: (v[lo:hi] if k in ['boxes_global', 'score', 'sample_idx', 'pts', 'name'] else v)
+                 for k, v in track.items()}
+        cls = track['name'][0]
+        features, origin = bridge.position_features(chunk, rng, with_class=(cls == 'Cyclist'))
+        pred, _, _ = model(tensor_batch(features, device))
+        boxes = bridge.position_to_global(pred['pred_boxes'][0, :hi-lo], origin)
+        output[start:end] = boxes[start-lo:end-lo]
+    return output
+
+
+def run_refining(tracks, models, device, size_policy='auto', refinement='full', z_policy='center', allow_errors=False):
+    refined, status = {}, {}
     for tid, track in tracks.items():
-        cls_name = track["name"]
-        if isinstance(cls_name, (list, np.ndarray)):
-            cls_name = cls_name[0]
-
-        # Prior size from multi-modal detector (median across all track frames)
-        prior_size = np.median(track["boxes_global"][:, 3:6], axis=0) # [dx, dy, dz]
-
-        if cls_name not in models["grm"] or cls_name not in models["prm"]:
-            refined_boxes[tid] = track["boxes_global"][:, :7]
-            continue
-
-        grm_model = models["grm"][cls_name]
-        prm_model = models["prm"][cls_name]
-
-        # Check that track has points
-        total_pts = sum(len(p) for p in track.get("pts", []))
-        if total_pts < 10:
-            # Fallback to detector/tracker box if points are too sparse
-            refined_boxes[tid] = track["boxes_global"][:, :7]
-            continue
-
+        original = track['boxes_global'][:, :7]
+        info = {'frames': len(original), 'grm': 'not_requested', 'prm': 'not_requested'}
+        status[tid] = info
+        refined[tid] = original.copy()
+        if refinement == 'none':
+            info['status'] = 'tracking_only'; continue
+        if sum(len(p) for p in track.get('pts', [])) < 10:
+            info['status'] = 'insufficient_points'; continue
+        rng = np.random.default_rng(int(hashlib.sha256(tid.encode()).hexdigest()[:8], 16))
+        cls = track['name'][0]
         try:
-            # 1. Geometry Refinement (GRM)
-            if size_policy == "detector_prior":
-                refined_size = prior_size
-            elif cls_name in ["Pedestrian", "Cyclist"]:
-                # Multi-modal BEVFusion detector already provides near-ground-truth sizes
-                # (~0.65x0.65x1.7m for ped), while LiDAR-only GRM without camera guidance
-                # causes unphysical box inflation. Preserve high-accuracy detector prior size.
-                refined_size = prior_size
-            else:
-                # Vehicle: run GRM but sanity-check against detector prior
-                geo_feat = bridge.geometry_features(track, rng)
-                geo_batch = {
-                    "geo_query_points": torch.from_numpy(geo_feat["geo_query_points"]).to(device),
-                    "geo_memory_points": torch.from_numpy(geo_feat["geo_memory_points"]).to(device),
-                    "geo_query_boxes": torch.from_numpy(geo_feat["geo_query_boxes"]).to(device),
-                    "geo_query_num": geo_feat["geo_query_num"]
-                }
-                with torch.no_grad():
-                    geo_preds, _, _ = grm_model(geo_batch)
-                    pred_size = geo_preds["pred_boxes"][0, 3:6]
-
-                if size_policy == "grm":
-                    refined_size = pred_size
-                else:
-                    # 'auto': check if GRM size is within plausible +/- 25% of detector prior
-                    ratios = pred_size / np.clip(prior_size, 1e-2, None)
-                    if np.all(ratios >= 0.75) and np.all(ratios <= 1.25):
-                        refined_size = pred_size
-                    else:
-                        refined_size = prior_size
-
-            # 2. Position Refinement (PRM)
-            with_class = (cls_name == "Cyclist")
-            pos_feat, origin = bridge.position_features(track, rng, with_class=with_class)
-            n_frames = len(track["sample_idx"])
-            pos_batch = {
-                "pos_query_points": torch.from_numpy(pos_feat["pos_query_points"]).to(device),
-                "pos_memory_points": torch.from_numpy(pos_feat["pos_memory_points"]).to(device),
-                "pos_trajectory": torch.from_numpy(pos_feat["pos_trajectory"]).to(device),
-                "padding_mask": torch.from_numpy(pos_feat["padding_mask"]).to(device)
-            }
+            prior = np.median(original[:, 3:6], axis=0)
+            size = prior
             with torch.no_grad():
-                pos_preds, _, _ = prm_model(pos_batch)
-                # Local refined trajectory shape (1, 200, 7)
-                local_boxes = pos_preds["pred_boxes"][0, :n_frames]
-                refined_pos_global = bridge.position_to_global(local_boxes, origin)
+                if size_policy == 'detector_prior':
+                    info['grm'] = 'detector_prior'
+                else:
+                    pred, _, _ = models['grm'][cls](tensor_batch(bridge.geometry_features(track, rng), device))
+                    size_pred = pred['pred_boxes'][0, 3:6]
+                    if not np.isfinite(size_pred).all() or np.any(size_pred <= 0):
+                        raise ValueError('Invalid GRM dimensions')
+                    ratio = size_pred / prior
+                    if size_policy == 'grm' or np.all((ratio >= .75) & (ratio <= 1.25)):
+                        size = size_pred; info['grm'] = 'accepted'
+                    else: info['grm'] = 'rejected_using_prior'
+                position = original.copy()
+                if refinement == 'full':
+                    position = position_chunks(track, models['prm'][cls], device, rng)
+                    info['prm'] = 'applied'
+                refined[tid] = bridge.combine_boxes(np.r_[np.zeros(3), size, 0], position,
+                                                     original_boxes=original, z_policy=z_policy)
+            info['status'] = 'processed'
+        except Exception as exc:
+            if not allow_errors: raise RuntimeError(f'Refinement failed for {tid}') from exc
+            info.update(status='error_fallback', error=str(exc), grm='not_applied', prm='not_applied')
+            print(f'[Fallback] {tid}: {exc}', flush=True)
+    return refined, status
 
-            # 3. Combine Size + Position with Ground-plane Pinning
-            combined = bridge.combine_boxes(
-                np.array([0, 0, 0, *refined_size, 0]),
-                refined_pos_global,
-                original_boxes=track["boxes_global"][:, :7]
-            )
-            refined_boxes[tid] = combined
 
-        except Exception as e:
-            print(f"[Refining] Warning: refining failed for track {tid} ({cls_name}): {e}, keeping tracking box.")
-            refined_boxes[tid] = track["boxes_global"][:, :7]
-
-    return refined_boxes
-
-
-def export_tracking_results(prepared: Dict[str, Any], tracks: Dict[str, Dict[str, Any]], refined_boxes: Dict[str, np.ndarray], output_file: Path):
-    """Export predictions with tracking IDs formatted for nuScenes tracking evaluation."""
-    tracking_output = copy.deepcopy(prepared["original"])
-    tracking_results = {token: [] for token in tracking_output["results"]}
-
-    VALID_TRACKING_NAMES = {'bicycle', 'bus', 'car', 'motorcycle', 'pedestrian', 'trailer', 'truck'}
-
-    for tid, track in tracks.items():
-        boxes = refined_boxes.get(tid, track["boxes_global"][:, :7])
-        track_cls = track["name"]
-        if isinstance(track_cls, (list, np.ndarray)):
-            track_cls = track_cls[0]
-
-        # Determine consistent category for the entire track from source detections
-        # Enforce that category MUST be compatible with track_cls (e.g. Vehicle can never be pedestrian)
-        compatible_names = {k for k, v in bridge.CLASS_MAP.items() if v == track_cls}
-
-        track_category = None
-        if "source_index" in track:
-            for s_idx, f_idx in zip(track["source_index"], track["sample_idx"]):
-                s_idx = int(s_idx)
-                if s_idx >= 0:
-                    frm = prepared["frames"][track["sequence_name"]][str(f_idx)]
-                    tkn = frm["sample_token"]
-                    if s_idx < len(prepared["original"]["results"][tkn]):
-                        det_n = prepared["original"]["results"][tkn][s_idx].get("detection_name", "")
-                        if det_n in compatible_names:
-                            track_category = det_n
-                            break
-
-        if track_category is None:
-            default_map = {"Vehicle": "car", "Pedestrian": "pedestrian", "Cyclist": "bicycle"}
-            track_category = default_map.get(track_cls, "car")
-
-        for i, frm_idx in enumerate(track["sample_idx"]):
-            frame_data = prepared["frames"][track["sequence_name"]][str(frm_idx)]
-            token = frame_data["sample_token"]
-            score = float(track["score"][i])
-            box = boxes[i]
-
-            # Convert to nuScenes record format
-            yaw = float(bridge.wrap_yaw(box[6]))
-            quat = [float(np.cos(yaw / 2)), 0.0, 0.0, float(np.sin(yaw / 2))]
-            tracking_rec = {
-                "sample_token": token,
-                "translation": [float(box[0]), float(box[1]), float(box[2])],
-                "size": [float(box[4]), float(box[3]), float(box[5])], # nuScenes [w, l, h]
-                "rotation": quat,
-                "velocity": [float(track["boxes_global"][i, 7]), float(track["boxes_global"][i, 8])],
-                "tracking_id": str(tid),
-                "tracking_name": track_category,
-                "tracking_score": score
-            }
-            tracking_results[token].append(tracking_rec)
-
-    tracking_output["results"] = tracking_results
-    output_file.write_text(json.dumps(tracking_output, indent=2))
-    print(f"[Export] Saved tracking results to {output_file}")
+def export_tracking_results(prepared, tracks, refined_boxes, output_file, coordinate_mode='global'):
+    output = {'meta': copy.deepcopy(prepared['original']['meta']),
+              'results': {token: [] for token in prepared['original']['results']}}
+    if coordinate_mode == 'ego':
+        output['coordinate_mode'] = 'ego_uncompensated_diagnostic'
+    claimed = set()
+    for tid, track in sorted(tracks.items(), key=lambda kv: (-len(kv[1]['sample_idx']), kv[0])):
+        name = track['nusc_name']
+        if name not in TRACKING_CLASSES: continue
+        boxes = refined_boxes.get(tid, track['boxes_global'][:, :7])
+        velocities = (np.gradient(boxes[:, :2], track['timestamp'], axis=0)
+                      if len(boxes) > 1 else track['boxes_global'][:, 7:9])
+        for i, idx in enumerate(track['sample_idx']):
+            token = prepared['frames'][track['sequence_name']][str(idx)]['sample_token']
+            source = int(track['source_index'][i])
+            # Matched observations only: no duplicate or fabricated detections.
+            if source < 0 or (token, source) in claimed: continue
+            original = prepared['original']['results'][token][source]
+            if original['detection_name'] != name: raise ValueError('Source class mismatch')
+            box = bridge.replace_box(original, boxes[i])
+            record = {k: box[k] for k in ['sample_token', 'translation', 'size', 'rotation']}
+            record.update(tracking_id=tid, tracking_name=name, tracking_score=original['detection_score'])
+            if coordinate_mode == 'global':
+                record['velocity'] = velocities[i].tolist()
+            output['results'][token].append(record); claimed.add((token, source))
+    Path(output_file).write_text(json.dumps(output, allow_nan=False))
+    return output
 
 
 def main():
     args = parse_args()
-    data_root = Path(args.data_root).resolve()
-    checkpoint_dir = Path(args.checkpoint_dir).resolve()
-    output_dir = Path(args.output_dir).resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    classes = [c.strip() for c in args.classes.split(",") if c.strip()]
-
-    print("=" * 60)
-    print("BEVFUSION -> DETZERO TRACKING & REFINING PIPELINE")
-    print(f"Results path   : {args.results_path}")
-    print(f"nuScenes root  : {data_root} ({args.version})")
-    print(f"Checkpoints    : {checkpoint_dir}")
-    print(f"Device         : {args.device}")
-    print(f"Output dir     : {output_dir}")
-    print("=" * 60)
-
-    # 1. Prepare detector output and sync timestamps
-    print("\n[Step 1/5] Preparing frames from detector output and nuScenes metadata...")
-    prepared = bridge.prepare(
-        results_path=args.results_path,
-        data_root=str(data_root),
-        version=args.version,
-        classes=classes,
-        min_score=args.min_score
-    )
-    n_scenes = len(prepared["frames"])
-    n_frames = sum(len(f) for f in prepared["frames"].values())
-    print(f"  -> Prepared {n_scenes} scenes, total {n_frames} frames.")
-
-    # 2. Run DetZero Tracking
-    print("\n[Step 2/5] Running DetZero Kalman & Data Association Tracking...")
-    tracks = run_tracking(prepared, args.tracking_cfg, args.device)
-    print(f"  -> Total tracks generated across all scenes: {len(tracks)}")
-
-    # 3. Object point clouds extraction & 4. Refining
-    refined_boxes = {}
-    if not args.skip_refining:
-        print("\n[Step 3/5] Extracting LiDAR point clouds for each tracked object...")
-        collect_track_pointclouds(prepared, tracks, data_root)
-
-        print("\n[Step 4/5] Loading GRM & PRM models and performing 3D refinement...")
-        models = load_refining_models(checkpoint_dir, args.device)
-        refined_boxes = run_refining(tracks, models, args.device, size_policy=args.size_policy)
-        print(f"  -> Refined {len(refined_boxes)} tracks.")
-    else:
-        print("\n[Step 3-4/5] Skipping refining as requested (--skip_refining).")
-        for tid, track in tracks.items():
-            refined_boxes[tid] = track["boxes_global"][:, :7]
-
-    # 5. Export back to nuScenes detection format
-    print("\n[Step 5/5] Exporting refined predictions back to nuScenes format...")
-    refined_output, replaced_count = bridge.export_detection(prepared, tracks, refined=refined_boxes)
-    det_out_file = output_dir / "results_nusc_detzero_refined.json"
-    det_out_file.write_text(json.dumps(refined_output, indent=2))
-    print(f"  -> Replaced {replaced_count} detection boxes with refined boxes.")
-    print(f"  -> Saved detection JSON: {det_out_file}")
-
-    # Export tracking format as well
-    track_out_file = output_dir / "results_nusc_detzero_tracking.json"
-    export_tracking_results(prepared, tracks, refined_boxes, track_out_file)
-
-    print("\n" + "=" * 60)
-    print("PIPELINE COMPLETED SUCCESSFULLY!")
-    print(f"1. Refined Detection output : {det_out_file}")
-    print(f"2. Tracking output          : {track_out_file}")
-    print("=" * 60)
+    if args.skip_refining: args.refinement = 'none'
+    if not 0 <= args.min_score <= 1: raise ValueError('min_score must be in [0, 1]')
+    classes = list(dict.fromkeys(c.strip() for c in args.classes.split(',') if c.strip()))
+    if not classes or set(classes) - set(bridge.CLASS_MAP): raise ValueError('Unsupported/empty classes')
+    prepared = bridge.prepare(args.results_path, args.data_root, args.version, classes, args.min_score)
+    check_coordinates(prepared, args.coordinate_mode, args.refinement, args.assume_stationary)
+    tracks = run_tracking(prepared, args.tracking_cfg, args.tracking_device or args.device, args.max_gap_seconds)
+    stages = []
+    if args.refinement != 'none' and args.size_policy != 'detector_prior': stages.append('grm')
+    if args.refinement == 'full': stages.append('prm')
+    needed = {t['name'][0] for t in tracks.values()}
+    models = load_refining_models(args.checkpoint_dir, args.device, needed, stages)
+    if args.refinement != 'none': collect_track_pointclouds(prepared, tracks, args.data_root, args.intensity_mode)
+    refined, status = run_refining(tracks, models, args.device, args.size_policy, args.refinement,
+                                   args.z_policy, args.allow_refine_errors)
+    output_dir = Path(args.output_dir); output_dir.mkdir(parents=True, exist_ok=True)
+    if models['checkpoints']:
+        prepared['original']['meta']['use_external'] = True
+    detection, replaced = bridge.export_detection(prepared, tracks, refined)
+    if args.coordinate_mode == 'ego': detection['coordinate_mode'] = 'ego_uncompensated_diagnostic'
+    (output_dir / 'results_nusc_detzero_refined.json').write_text(json.dumps(detection, allow_nan=False))
+    tracking_name = 'tracks_ego_diagnostic.json' if args.coordinate_mode == 'ego' else 'results_nusc_detzero_tracking.json'
+    export_tracking_results(prepared, tracks, refined, output_dir / tracking_name, args.coordinate_mode)
+    (output_dir / 'tracks.pkl').write_bytes(pickle.dumps({k: {n: v for n, v in t.items() if n != 'pts'} for k, t in tracks.items()}, protocol=4))
+    (output_dir / 'refined_boxes.pkl').write_bytes(pickle.dumps(refined, protocol=4))
+    git = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=DETZERO_ROOT, capture_output=True, text=True)
+    diff = subprocess.run(['git', 'diff', 'HEAD', '--', '.'], cwd=DETZERO_ROOT, capture_output=True)
+    report = {'arguments': vars(args), 'git_commit': git.stdout.strip(), 'input_sha256': prepared['source_sha256'],
+              'git_diff_sha256': hashlib.sha256(diff.stdout).hexdigest(),
+              'runtime': {'python': sys.version, 'torch': torch.__version__, 'numpy': np.__version__},
+              'frames': sum(len(f) for f in prepared['frames'].values()),
+              'tracking_config_sha256': hashlib.sha256(Path(args.tracking_cfg).read_bytes()).hexdigest(),
+              'identity_ego_pose': prepared['identity_ego_pose'], 'coordinate_mode': args.coordinate_mode,
+              'checkpoints': models['checkpoints'], 'tracks': len(tracks),
+              'matched_boxes_replaced': replaced, 'status_counts': dict(Counter(s['status'] for s in status.values())),
+              'grm_counts': dict(Counter(s['grm'] for s in status.values())),
+              'prm_counts': dict(Counter(s['prm'] for s in status.values())), 'track_status': status,
+              'notes': ['Offline; untracked detections and detector scores are preserved.',
+                        'No CRM. Ego diagnostics do not establish physical world trajectories.']}
+    (output_dir / 'run_report.json').write_text(json.dumps(report, indent=2, allow_nan=False))
+    print(f'Completed: {len(tracks)} tracks, {replaced} matched boxes replaced; {report["status_counts"]}')
+    print(f'Outputs: {output_dir}')
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__': main()

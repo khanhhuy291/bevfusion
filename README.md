@@ -1,6 +1,9 @@
 # BEVFusion
 
-Hướng dẫn chạy thử trên VM GCP: [nuScenes mini + checkpoint detection](docs/RUN_NUSCENES_MINI_VM.md).
+Hướng dẫn chạy thử trên VM GCP:
+
+- [nuScenes mini + checkpoint detection](docs/RUN_NUSCENES_MINI_VM.md)
+- [BEVFusion → DetZero Tracking & Refining (nuScenes-mini & VF6_01 5 Hz)](docs/RUN_TRACKING_AND_REFINING.md)
 
 ### [website](http://bevfusion.mit.edu/) | [paper](https://arxiv.org/abs/2205.13542) | [video](https://www.youtube.com/watch?v=uCAka90si9E)
 

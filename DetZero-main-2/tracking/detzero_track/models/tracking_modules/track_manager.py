@@ -255,8 +255,11 @@ class TrackManager():
         if not da_stage and 'num_points' not in det_data.keys():
             det_data['num_points'] = np.zeros_like(det_data['score'])
 
-        matched, track_unmatch, det_unmatch = \
-            self.modules_dicts['data_association_module'].only_two_stage(det_data, track_data)
+        association = self.modules_dicts['data_association_module']
+        if da_stage:
+            matched, track_unmatch, det_unmatch, _ = association(det_data, track_data)
+        else:
+            matched, track_unmatch, det_unmatch = association.only_two_stage(det_data, track_data)
 
         det_boxes = det_data['boxes_global'][:, :9]
         det_name = det_data['name']
@@ -273,6 +276,10 @@ class TrackManager():
         track_output_data = dict()
         for track in tracks:
             track_output_data.update(copy.deepcopy(track.info()))
+
+        death_age = self.modules_dicts['track_age_config'].death_age
+        if death_age != -1:
+            tracks = [track for track in tracks if track.miss < death_age]
 
         for obj_idx, obj_id in enumerate(trk_data['obj_ids']):
             if trk_data['start'][obj_idx] == 0:

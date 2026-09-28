@@ -28,7 +28,9 @@ MODEL:
             ASSIGNMENT_METHOD: 'GNN'
             
             STAGE:
-                NAME: 'two_stage'
+                # Input is already filtered by min_score. No point counts are
+                # available at association time, so use an explicit single stage.
+                NAME: 'one_stage'
                 FIRST_STAGE:
                     DIST_THRESHOLD: 
                         [0.2, 0.1, 0.1]

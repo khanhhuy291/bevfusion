@@ -118,6 +118,8 @@ def prepare(results_path, data_root, version, classes, min_score):
             }
     return {'schema': 1, 'version': version, 'classes': list(classes),
             'min_score': min_score, 'frames': frames, 'original': original,
+            'identity_ego_pose': all(np.allclose(pose(egos[lidar[t]['ego_pose_token']]), np.eye(4))
+                                     for t in results),
             'source_sha256': hashlib.sha256(Path(results_path).read_bytes()).hexdigest()}
 
 
@@ -212,24 +214,25 @@ def position_to_global(boxes, origin):
     return result
 
 
-def combine_boxes(geometry, position, original_boxes=None):
+def combine_boxes(geometry, position, original_boxes=None, z_policy='center'):
     out = np.asarray(position).copy()
     geo = np.asarray(geometry)
     new_size = geo[3:6] if geo.ndim == 1 else geo[:, 3:6]
     out[:, 3:6] = new_size
 
-    # Ground-plane pinning: preserve bottom contact elevation (z_bottom = z_orig - h_orig / 2)
-    # This guarantees the box bottom always touches the road surface, preventing floating or sunken boxes.
-    if original_boxes is not None:
+    # Keeping the detector bottom is optional; it is not a ground-plane estimate.
+    if z_policy == 'preserve_bottom' and original_boxes is not None:
         orig = np.asarray(original_boxes)
         z_bottom = orig[:, 2] - orig[:, 5] / 2.0
         new_h = new_size[2] if new_size.ndim == 1 else new_size[:, 2]
         out[:, 2] = z_bottom + new_h / 2.0
-    else:
+    elif z_policy == 'preserve_bottom':
         old_h = np.asarray(position)[:, 5]
         new_h = new_size[2] if new_size.ndim == 1 else new_size[:, 2]
         z_bottom = np.asarray(position)[:, 2] - old_h / 2.0
         out[:, 2] = z_bottom + new_h / 2.0
+    elif z_policy != 'center':
+        raise ValueError(z_policy)
 
     if not np.isfinite(out).all() or np.any(out[:, 3:6] <= 0):
         raise ValueError('Refiner produced invalid boxes; output not accepted')
@@ -251,8 +254,7 @@ def export_detection(prepared, tracks, refined=None):
             if source < 0 or (token, source) in claimed:
                 continue
             original = output['results'][token][source]
-            track_cls = track['name'][0] if isinstance(track['name'], (list, np.ndarray)) else track['name']
-            if original['detection_name'] != track.get('nusc_name', None) and CLASS_MAP.get(original['detection_name']) != track_cls:
+            if original['detection_name'] != track['nusc_name']:
                 raise ValueError('Track class differs from source detection')
             output['results'][token][source] = replace_box(original, np.asarray(boxes[i]))
             claimed.add((token, source)); replaced += 1
