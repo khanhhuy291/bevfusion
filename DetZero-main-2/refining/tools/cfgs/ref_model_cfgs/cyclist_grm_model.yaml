@@ -14,6 +14,7 @@ MODEL:
         MEMORY_ENCODER: [128, 128]
         REGRESSION_MLP: [512]
         EMBED_DIMS: 256
+        ANCHOR_SIZES: [[1.8, 0.8, 1.7], [2.0, 0.9, 1.6], [1.6, 0.7, 1.5]]
 
         DECODER: 
             NAME: GeometryHead

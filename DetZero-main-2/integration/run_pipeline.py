@@ -57,6 +57,9 @@ def parse_args():
     parser.add_argument("--classes", type=str,
                         default="car,truck,bus,trailer,construction_vehicle,pedestrian,motorcycle,bicycle",
                         help="Comma-separated nuScenes classes to track and refine")
+    parser.add_argument("--size_policy", type=str, default="auto",
+                        choices=["auto", "detector_prior", "grm"],
+                        help="Policy for bounding box dimensions: 'auto' (preserves multi-modal detector prior for human/cyclist, checks vehicle GRM), 'detector_prior' (maintains BEVFusion multi-modal sizes across all classes), 'grm' (unconstrained GRM size prediction)")
     return parser.parse_args()
 
 
@@ -167,7 +170,8 @@ def collect_track_pointclouds(prepared: Dict[str, Any], tracks: Dict[str, Dict[s
     print(f"[LiDAR] Extracted object point clouds for {len(tracks)} tracks.")
 
 
-def run_refining(tracks: Dict[str, Dict[str, Any]], models: Dict[str, Dict[str, Any]], device: str) -> Dict[str, np.ndarray]:
+def run_refining(tracks: Dict[str, Dict[str, Any]], models: Dict[str, Dict[str, Any]], device: str,
+                 size_policy: str = "auto") -> Dict[str, np.ndarray]:
     """Run GRM (geometry) and PRM (position/heading) models on each track."""
     refined_boxes = {}
     rng = np.random.default_rng(42)
@@ -176,6 +180,9 @@ def run_refining(tracks: Dict[str, Dict[str, Any]], models: Dict[str, Dict[str, 
         cls_name = track["name"]
         if isinstance(cls_name, (list, np.ndarray)):
             cls_name = cls_name[0]
+
+        # Prior size from multi-modal detector (median across all track frames)
+        prior_size = np.median(track["boxes_global"][:, 3:6], axis=0) # [dx, dy, dz]
 
         if cls_name not in models["grm"] or cls_name not in models["prm"]:
             refined_boxes[tid] = track["boxes_global"][:, :7]
@@ -193,17 +200,35 @@ def run_refining(tracks: Dict[str, Dict[str, Any]], models: Dict[str, Dict[str, 
 
         try:
             # 1. Geometry Refinement (GRM)
-            geo_feat = bridge.geometry_features(track, rng)
-            geo_batch = {
-                "geo_query_points": torch.from_numpy(geo_feat["geo_query_points"]).to(device),
-                "geo_memory_points": torch.from_numpy(geo_feat["geo_memory_points"]).to(device),
-                "geo_query_boxes": torch.from_numpy(geo_feat["geo_query_boxes"]).to(device),
-                "geo_query_num": geo_feat["geo_query_num"]
-            }
-            with torch.no_grad():
-                geo_preds, _, _ = grm_model(geo_batch)
-                # geo_preds['pred_boxes'] shape is (1, 7) with sizes at [3:6]
-                refined_size = geo_preds["pred_boxes"][0, 3:6]
+            if size_policy == "detector_prior":
+                refined_size = prior_size
+            elif cls_name in ["Pedestrian", "Cyclist"]:
+                # Multi-modal BEVFusion detector already provides near-ground-truth sizes
+                # (~0.65x0.65x1.7m for ped), while LiDAR-only GRM without camera guidance
+                # causes unphysical box inflation. Preserve high-accuracy detector prior size.
+                refined_size = prior_size
+            else:
+                # Vehicle: run GRM but sanity-check against detector prior
+                geo_feat = bridge.geometry_features(track, rng)
+                geo_batch = {
+                    "geo_query_points": torch.from_numpy(geo_feat["geo_query_points"]).to(device),
+                    "geo_memory_points": torch.from_numpy(geo_feat["geo_memory_points"]).to(device),
+                    "geo_query_boxes": torch.from_numpy(geo_feat["geo_query_boxes"]).to(device),
+                    "geo_query_num": geo_feat["geo_query_num"]
+                }
+                with torch.no_grad():
+                    geo_preds, _, _ = grm_model(geo_batch)
+                    pred_size = geo_preds["pred_boxes"][0, 3:6]
+
+                if size_policy == "grm":
+                    refined_size = pred_size
+                else:
+                    # 'auto': check if GRM size is within plausible +/- 25% of detector prior
+                    ratios = pred_size / np.clip(prior_size, 1e-2, None)
+                    if np.all(ratios >= 0.75) and np.all(ratios <= 1.25):
+                        refined_size = pred_size
+                    else:
+                        refined_size = prior_size
 
             # 2. Position Refinement (PRM)
             with_class = (cls_name == "Cyclist")
@@ -221,8 +246,12 @@ def run_refining(tracks: Dict[str, Dict[str, Any]], models: Dict[str, Dict[str, 
                 local_boxes = pos_preds["pred_boxes"][0, :n_frames]
                 refined_pos_global = bridge.position_to_global(local_boxes, origin)
 
-            # 3. Combine Size + Position
-            combined = bridge.combine_boxes(np.array([0, 0, 0, *refined_size, 0]), refined_pos_global)
+            # 3. Combine Size + Position with Ground-plane Pinning
+            combined = bridge.combine_boxes(
+                np.array([0, 0, 0, *refined_size, 0]),
+                refined_pos_global,
+                original_boxes=track["boxes_global"][:, :7]
+            )
             refined_boxes[tid] = combined
 
         except Exception as e:
@@ -245,32 +274,36 @@ def export_tracking_results(prepared: Dict[str, Any], tracks: Dict[str, Dict[str
         if isinstance(cls_name, (list, np.ndarray)):
             cls_name = cls_name[0]
 
+        # Determine consistent category for the entire track from source detections
+        track_category = None
+        for s_idx, f_idx in zip(track["source_index"], track["sample_idx"]):
+            s_idx = int(s_idx)
+            if s_idx >= 0:
+                frm = prepared["frames"][track["sequence_name"]][str(f_idx)]
+                tkn = frm["sample_token"]
+                if s_idx < len(prepared["original"]["results"][tkn]):
+                    det_n = prepared["original"]["results"][tkn][s_idx].get("detection_name", "")
+                    if det_n in VALID_TRACKING_NAMES:
+                        track_category = det_n
+                        break
+
+        if track_category is None:
+            if cls_name == "Pedestrian":
+                track_category = "pedestrian"
+            elif cls_name == "Cyclist":
+                track_category = "bicycle"
+            elif cls_name == "Vehicle":
+                track_category = "car"
+            elif str(cls_name).lower() in VALID_TRACKING_NAMES:
+                track_category = str(cls_name).lower()
+            else:
+                track_category = "car"
+
         for i, frm_idx in enumerate(track["sample_idx"]):
             frame_data = prepared["frames"][track["sequence_name"]][str(frm_idx)]
             token = frame_data["sample_token"]
             score = float(track["score"][i])
             box = boxes[i]
-            source = int(track["source_index"][i])
-
-            # Determine nuScenes tracking category
-            tracking_name = None
-            if source >= 0 and source < len(prepared["original"]["results"][token]):
-                orig_name = prepared["original"]["results"][token][source].get("detection_name", "")
-                if orig_name in VALID_TRACKING_NAMES:
-                    tracking_name = orig_name
-
-            if tracking_name is None:
-                # Map from DetZero class
-                if cls_name == "Pedestrian":
-                    tracking_name = "pedestrian"
-                elif cls_name == "Cyclist":
-                    tracking_name = "bicycle"
-                elif cls_name == "Vehicle":
-                    tracking_name = "car"
-                elif str(cls_name).lower() in VALID_TRACKING_NAMES:
-                    tracking_name = str(cls_name).lower()
-                else:
-                    tracking_name = "car"
 
             # Convert to nuScenes record format
             yaw = float(bridge.wrap_yaw(box[6]))
@@ -282,7 +315,7 @@ def export_tracking_results(prepared: Dict[str, Any], tracks: Dict[str, Dict[str
                 "rotation": quat,
                 "velocity": [float(track["boxes_global"][i, 7]), float(track["boxes_global"][i, 8])],
                 "tracking_id": str(tid),
-                "tracking_name": tracking_name,
+                "tracking_name": track_category,
                 "tracking_score": score
             }
             tracking_results[token].append(tracking_rec)
@@ -335,7 +368,7 @@ def main():
 
         print("\n[Step 4/5] Loading GRM & PRM models and performing 3D refinement...")
         models = load_refining_models(checkpoint_dir, args.device)
-        refined_boxes = run_refining(tracks, models, args.device)
+        refined_boxes = run_refining(tracks, models, args.device, size_policy=args.size_policy)
         print(f"  -> Refined {len(refined_boxes)} tracks.")
     else:
         print("\n[Step 3-4/5] Skipping refining as requested (--skip_refining).")

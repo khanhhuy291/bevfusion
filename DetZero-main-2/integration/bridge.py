@@ -212,9 +212,25 @@ def position_to_global(boxes, origin):
     return result
 
 
-def combine_boxes(geometry, position):
+def combine_boxes(geometry, position, original_boxes=None):
     out = np.asarray(position).copy()
-    out[:, 3:6] = np.asarray(geometry)[3:6]
+    geo = np.asarray(geometry)
+    new_size = geo[3:6] if geo.ndim == 1 else geo[:, 3:6]
+    out[:, 3:6] = new_size
+
+    # Ground-plane pinning: preserve bottom contact elevation (z_bottom = z_orig - h_orig / 2)
+    # This guarantees the box bottom always touches the road surface, preventing floating or sunken boxes.
+    if original_boxes is not None:
+        orig = np.asarray(original_boxes)
+        z_bottom = orig[:, 2] - orig[:, 5] / 2.0
+        new_h = new_size[2] if new_size.ndim == 1 else new_size[:, 2]
+        out[:, 2] = z_bottom + new_h / 2.0
+    else:
+        old_h = np.asarray(position)[:, 5]
+        new_h = new_size[2] if new_size.ndim == 1 else new_size[:, 2]
+        z_bottom = np.asarray(position)[:, 2] - old_h / 2.0
+        out[:, 2] = z_bottom + new_h / 2.0
+
     if not np.isfinite(out).all() or np.any(out[:, 3:6] <= 0):
         raise ValueError('Refiner produced invalid boxes; output not accepted')
     return out

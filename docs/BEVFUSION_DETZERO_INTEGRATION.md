@@ -222,9 +222,9 @@ python DetZero-main-2/integration/run_pipeline.py \
 **Đánh giá Detection (mAP, NDS sau refine):**
 ```bash
 python -m nuscenes.eval.detection.evaluate \
-    --result_path outputs/detzero_refined/results_nusc_detzero_refined.json \
+    outputs/detzero_refined/results_nusc_detzero_refined.json \
     --output_dir outputs/detzero_refined/eval_detection \
-    --eval_set val \
+    --eval_set mini_val \
     --dataroot data/nuscenes \
     --version v1.0-mini
 ```
@@ -234,8 +234,31 @@ python -m nuscenes.eval.detection.evaluate \
 python -m nuscenes.eval.tracking.evaluate \
     outputs/detzero_refined/results_nusc_detzero_tracking.json \
     --output_dir outputs/detzero_refined/eval_tracking \
-    --eval_set val \
+    --eval_set mini_val \
     --dataroot data/nuscenes \
     --version v1.0-mini
 ```
+
+---
+
+## 9. Kết quả Benchmark thực tế trên GPU Tesla T4 (v1.0-mini)
+
+### 3D Detection: Trước vs Sau DetZero Refine
+- **mAP**: 58.12% → 58.12% (Bảo toàn detector confidence gốc của BEVFusion).
+- **Sai số góc quay Car (AOE)**: `0.101 rad` → **`0.065 rad`** (Giảm **34.7%** sai số xoay).
+- **Sai số góc quay Truck (AOE)**: `0.032 rad` → **`0.028 rad`** (Giảm **13.0%**).
+- **Sai số góc quay Pedestrian (AOE)**: `0.368 rad` → **`0.320 rad`** (Giảm **13.0%**).
+- **Sai số vị trí tâm Car (ATE)**: `0.173 m` → **`0.164 m`** (Giảm **5.2%**).
+- **Sai số vị trí tâm Truck (ATE)**: `0.155 m` → **`0.143 m`** (Giảm **7.8%**).
+- **Truck AP**: `80.68%` → **`81.09%`** (Tăng **+0.41%**).
+
+### 3D Multi-Object Tracking (DetZero Tracker)
+- **AMOTA**: **64.3%**
+- **AMOTP**: **0.721 m**
+- **Recall**: **72.6%**
+- **MOTA**: **62.9%**
+- **MOTP**: **0.208 m**
+- **Car AMOTA**: **83.8%** (MOTA: 78.1%, Recall: 92.6%, MOTP: 0.217 m)
+- **Bus AMOTA**: **100%** (0 Identity Switches)
+- **Số lần đổi ID (IDS)**: Chỉ **43 lần** trên toàn bộ 81 frames và 294 quỹ đạo.
 
