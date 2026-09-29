@@ -114,3 +114,5 @@ validation, không mặc định 9 tốt nhất. Nếu tăng sweep giảm AP, ki
 đối tượng động bị kéo dài, sai số roll/pitch, đồng bộ NAV và saturation của
 voxelizer. Không thay ngưỡng score hay nhãn giữa các thí nghiệm. Quy ước Z
 của prediction và Rider/Pedestrian vẫn cần xử lý độc lập trước DetZero.
+
+Kết quả kiểm tra convention Z của checkpoint legacy và lệnh xuất JSON cho DetZero: [VF_SWEEPS5_CENTER_AUDIT.md](VF_SWEEPS5_CENTER_AUDIT.md).
