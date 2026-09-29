@@ -1,7 +1,8 @@
 # BEVFusion
 
-Hướng dẫn chạy thử trên VM GCP:
+Hướng dẫn môi trường và chạy thử:
 
+- [Docker trên máy công ty RTX 5060: khởi động môi trường và trạng thái nuScenes detection](docs/README_RTX5060_DOCKER.md)
 - [nuScenes mini + checkpoint detection](docs/RUN_NUSCENES_MINI_VM.md)
 - [BEVFusion → DetZero Tracking & Refining (nuScenes-mini & VF6_01 5 Hz)](docs/RUN_TRACKING_AND_REFINING.md)
 

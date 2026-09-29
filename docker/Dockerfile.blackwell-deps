@@ -1,0 +1,34 @@
+# Experimental dependency build, not a complete BEVFusion runtime.
+# The base image is built on the company workstation as documented in
+# docs/README_RTX5060_DOCKER.md. No repository code or data is copied here.
+FROM bevfusion-blackwell:base
+
+USER root
+ENV MAX_JOBS=2 TORCH_CUDA_ARCH_LIST=12.0
+
+# Keep the validated base packages while resolving extra dependencies.
+RUN python -m pip freeze > /opt/base-constraints.txt
+ENV PIP_CONSTRAINT=/opt/base-constraints.txt
+
+# mpi4py 3.1.6 uses distutils new_compiler(dry_run=...). Build with the
+# base image's setuptools 75.3.0, not a newer isolated build backend.
+RUN python -m pip install --no-cache-dir --no-build-isolation \
+    numba==0.56.4 mpi4py==3.1.6 torchpack==0.3.1 \
+    tensorboard==2.13.0 protobuf==3.20.3 multimethod==1.9.1 \
+    addict==2.4.0 yapf==0.40.1 terminaltables==3.1.10 \
+    thop==0.1.1.post2209072238
+
+# Build against the installed PyTorch/CUDA, including sm_120. Do not use
+# old prebuilt MMCV wheels or install the separate lightweight mmcv package.
+RUN MMCV_WITH_OPS=1 FORCE_CUDA=1 python -m pip install -v \
+    --no-cache-dir --no-build-isolation --no-deps \
+    --no-binary=mmcv-full mmcv-full==1.7.2
+
+RUN python -m pip install --no-cache-dir --no-build-isolation mmdet==2.28.2 \
+    && python -m pip check
+
+# This is an import check only: Docker build does not expose the GPU.
+RUN python -c "import mmcv, mmdet, numba; from mmcv.ops import nms; from torchpack import distributed; from mpi4py import MPI; print('Dependency imports OK', mmcv.__version__, mmdet.__version__)"
+
+WORKDIR /workspace/bevfusion
+CMD ["/bin/bash"]
