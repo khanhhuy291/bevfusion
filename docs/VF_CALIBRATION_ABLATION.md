@@ -12,11 +12,11 @@ bắt đầu khoảng y=1002 trên ảnh gốc, cắt mất phần lớn vùng c
 
 Kiểm tra tâm GT trong phạm vi đánh giá, num_lidar_pts > 0, trên đủ 155 frame:
 
-| Class | GT | Tâm trong ảnh gốc | Tâm trong crop baseline | Tâm trong crop sau đổi camera |
-|---|---:|---:|---:|---:|
-| car | 4846 | 4846 | 59 | 4606 |
-| motorcycle | 2477 | 2477 | 197 | 2295 |
-| pedestrian | 518 | 518 | 0 | 406 |
+| Class      | GT   | Tâm trong ảnh gốc | Tâm trong crop baseline | Tâm trong crop sau đổi camera |
+| ------------| -----:| ------------------:| ------------------------:| ------------------------------:|
+| car        | 4846 | 4846              | 59                      | 4606                          |
+| motorcycle | 2477 | 2477              | 197                     | 2295                          |
+| pedestrian | 518  | 518               | 0                       | 406                           |
 
 Cột cuối chỉ đếm tia nằm trong chính camera nguồn tương ứng và crop đầu ra.
 Đây là độ phủ hình học của **tâm box**, không phải độ nhìn thấy sau che khuất,
