@@ -97,12 +97,16 @@ def validate(root, version='v1.0-trainval', infos=None, full=False):
         data = pickle.loads(Path(infos).read_bytes())
         assert {i['token'] for i in data['infos']} == set(samples), 'info/sample token mismatch'
         missing_paths, outside_root_paths = 0, 0
+        allowed_roots = [root]
+        if meta.get('dataset') == 'vf_calibration_ablation':
+            allowed_roots.append(Path(meta['source_root']).resolve())
         for item in data['infos']:
             paths = [item['lidar_path']] + [c['data_path'] for c in item['cams'].values()]
             missing_paths += sum(not Path(p).is_file() for p in paths)
-            outside_root_paths += sum(root not in Path(p).resolve().parents for p in paths)
+            outside_root_paths += sum(not any(r in Path(p).resolve().parents for r in allowed_roots) for p in paths)
         pkl_report = {'frames': len(data['infos']), 'missing_paths': missing_paths,
-                      'outside_root_paths': outside_root_paths, 'metadata': data['metadata']}
+                      'outside_root_paths': outside_root_paths, 'metadata': data['metadata'],
+                      'allowed_roots': [str(r) for r in allowed_roots]}
         if missing_paths: errors.append(f'PKL contains {missing_paths} missing paths; regenerate on the target machine.')
         if outside_root_paths: errors.append(f'PKL contains {outside_root_paths} paths outside this dataset root; regenerate.')
     report = {'data_root': str(root), 'version': version, 'scenes': len(scenes), 'samples': len(samples),

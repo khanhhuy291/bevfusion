@@ -208,3 +208,5 @@ Video dùng FPS từ timestamp, cùng ngưỡng score giữa hai nhánh, tâm bo
 Trong ego diagnostic, đường nối ID chỉ là lịch sử tọa độ ego chưa bù, không phải đường đi trên bản đồ.
 Tests gồm class isolation, empty frame/reverse, tọa độ/Z, fallback, track >200 frame,
 perfect/empty prediction cho evaluator và forward thực sáu checkpoint nếu có file local.
+
+Thử sửa crop camera và hệ tọa độ LiDAR cho VF6: [Calibration ablation](VF_CALIBRATION_ABLATION.md).

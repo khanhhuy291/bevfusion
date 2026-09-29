@@ -226,3 +226,5 @@ If BEVFusion is useful or relevant to your research, please kindly recognize our
   year={2023}
 }
 ```
+
+Thử sửa crop camera và hệ tọa độ LiDAR cho VF6: [Calibration ablation](docs/VF_CALIBRATION_ABLATION.md).

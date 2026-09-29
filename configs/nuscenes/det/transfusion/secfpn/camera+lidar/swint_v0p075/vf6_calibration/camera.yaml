@@ -1,0 +1,2 @@
+# Calibration ablation; regenerate infos in this derived dataset.
+dataset_root: data/nuscenes_vf6_01_5hz_camera/
