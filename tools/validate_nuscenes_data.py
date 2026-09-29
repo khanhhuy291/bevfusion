@@ -39,10 +39,9 @@ def validate(root, version='v1.0-trainval', infos=None, full=False):
         assert row['sample_token'] in samples and row['ego_pose_token'] in egos
         calib = calibs[row['calibrated_sensor_token']]
         channel = sensors[calib['sensor_token']]['channel']
-        if not row['is_key_frame']:
-            continue
-        assert channel not in by_sample[row['sample_token']], 'duplicate keyframe channel'
-        by_sample[row['sample_token']][channel] = row
+        if row['is_key_frame']:
+            assert channel not in by_sample[row['sample_token']], 'duplicate keyframe channel'
+            by_sample[row['sample_token']][channel] = row
         path = root / row['filename']
         if not path.is_file():
             errors.append('Missing sensor: ' + str(path)); continue
@@ -91,6 +90,10 @@ def validate(root, version='v1.0-trainval', infos=None, full=False):
                 assert other['instance_token'] == ann['instance_token'] and other[opposite] == ann['token'], 'broken annotation chain'
     identity = all(np.allclose(e['translation'], 0) and np.allclose(Quaternion(e['rotation']).rotation_matrix, np.eye(3)) for e in egos.values())
     if identity: warnings.append('Identity ego poses: global trajectories and velocities are not established.')
+    pose_path = root / 'pose_report.json'
+    pose_report = json.loads(pose_path.read_text()) if pose_path.exists() else {}
+    if pose_report.get('available'):
+        warnings.extend(pose_report.get('limitations', []))
     if annotations and all(not a['attribute_tokens'] for a in annotations.values()): warnings.append('No GT attributes: do not report NDS/mAAE as a validated VF benchmark.')
     pkl_report = None
     if infos:
@@ -101,10 +104,17 @@ def validate(root, version='v1.0-trainval', infos=None, full=False):
         if meta.get('dataset') == 'vf_calibration_ablation':
             allowed_roots.append(Path(meta['source_root']).resolve())
         for item in data['infos']:
-            paths = [item['lidar_path']] + [c['data_path'] for c in item['cams'].values()]
+            ages = [(item['timestamp'] - s['timestamp']) / 1e6 for s in item['sweeps']]
+            assert all(a > 0 for a in ages), 'future or duplicate-current sweep'
+            assert all(a < b for a, b in zip(ages, ages[1:])), 'sweep history is not ordered'
+            assert len({s['sample_data_token'] for s in item['sweeps']}) == len(ages), 'duplicate sweep'
+            if ages:
+                assert max(ages) <= data['metadata']['max_sweep_age_seconds'], 'sweep exceeds configured age'
+            paths = [item['lidar_path']] + [c['data_path'] for c in item['cams'].values()] + [s['data_path'] for s in item['sweeps']]
             missing_paths += sum(not Path(p).is_file() for p in paths)
             outside_root_paths += sum(not any(r in Path(p).resolve().parents for r in allowed_roots) for p in paths)
         pkl_report = {'frames': len(data['infos']), 'missing_paths': missing_paths,
+                      'sweep_counts': dict(Counter(len(i['sweeps']) for i in data['infos'])),
                       'outside_root_paths': outside_root_paths, 'metadata': data['metadata'],
                       'allowed_roots': [str(r) for r in allowed_roots]}
         if missing_paths: errors.append(f'PKL contains {missing_paths} missing paths; regenerate on the target machine.')
@@ -118,7 +128,9 @@ def validate(root, version='v1.0-trainval', infos=None, full=False):
               'image_sizes': dict(image_sizes), 'intensity_range': [intensity_min, intensity_max] if full else None,
               'zero_point_gt': sum(a['num_lidar_pts'] == 0 for a in annotations.values()),
               'infos': pkl_report, 'full_sensor_read': full, 'errors': errors, 'warnings': warnings,
-              'detection_structure_ok': not errors, 'global_motion_ready': not identity}
+              'detection_structure_ok': not errors, 'global_motion_ready': not identity,
+              'pose_report': pose_report,
+              'pose_validation_note': 'Nonidentity poses are not proof of validated 6-DoF INS.'}
     return report
 
 

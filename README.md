@@ -228,3 +228,5 @@ If BEVFusion is useful or relevant to your research, please kindly recognize our
 ```
 
 Thử sửa crop camera và hệ tọa độ LiDAR cho VF6: [Calibration ablation](docs/VF_CALIBRATION_ABLATION.md).
+
+Dữ liệu VF có NAV và sweep: [Hướng dẫn so sánh 0/2/5/9 sweep](docs/VF_NAV_SWEEPS.md).

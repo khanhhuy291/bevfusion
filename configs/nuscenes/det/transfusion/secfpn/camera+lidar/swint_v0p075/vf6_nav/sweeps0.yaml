@@ -1,0 +1,2 @@
+# Same NAV poses, camera warp and LiDAR frame; vary only history count.
+vf_sweeps: 0

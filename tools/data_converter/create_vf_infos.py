@@ -1,5 +1,6 @@
 import os
 import pickle
+import json
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
@@ -59,14 +60,20 @@ def obtain_sensor2top(nusc, sensor_token, l2e_t, l2e_r_mat, e2g_t, e2g_r_mat, se
     return sweep
 
 def create_vf_infos(root_path="data/nuscenes_vf6_01_5hz", version="v1.0-trainval", max_sweeps=0,
-                    output_name="bevfusion_infos_val.pkl"):
-    # This custom export has no measured ego trajectory. Do not manufacture
-    # velocities from positions in different ego frames or accumulate sweeps.
-    if max_sweeps != 0:
-        raise ValueError("VF single-frame converter requires --max-sweeps 0")
+                    output_name="bevfusion_infos_val.pkl", max_sweep_age=1.0):
+    if max_sweeps < 0 or max_sweep_age <= 0:
+        raise ValueError('max_sweeps must be nonnegative and max_sweep_age positive')
     root_path = str(Path(root_path).resolve())
     print(f"Creating infos for {root_path} ({version})...")
     nusc = NuScenes(version=version, dataroot=root_path, verbose=True)
+    pose_path = Path(root_path) / 'pose_report.json'
+    pose_report = json.loads(pose_path.read_text()) if pose_path.exists() else {}
+    moving = any(not np.allclose(p['translation'], 0) or
+                 not np.allclose(Quaternion(p['rotation']).rotation_matrix, np.eye(3))
+                 for p in nusc.ego_pose)
+    motion_available = bool(pose_report.get('available')) and moving
+    if max_sweeps and not motion_available:
+        raise ValueError('Sweeps require measured poses and pose_report.json available=true')
 
     val_nusc_infos = []
     token2idx = {}
@@ -99,6 +106,29 @@ def create_vf_infos(root_path="data/nuscenes_vf6_01_5hz", version="v1.0-trainval
         e2g_t = info['ego2global_translation']
         l2e_r_mat = Quaternion(l2e_r).rotation_matrix
         e2g_r_mat = Quaternion(e2g_r).rotation_matrix
+        previous = sd_rec['prev']
+        seen = {lidar_token}
+        last_timestamp = sd_rec['timestamp']
+        while previous and len(info['sweeps']) < max_sweeps:
+            if previous in seen:
+                raise ValueError('Cycle in LiDAR sample_data history')
+            seen.add(previous)
+            sweep_sd = nusc.get('sample_data', previous)
+            if sweep_sd['timestamp'] >= last_timestamp:
+                raise ValueError('Sweep history must be strictly in the past')
+            last_timestamp = sweep_sd['timestamp']
+            if nusc.get('sample', sweep_sd['sample_token'])['scene_token'] != sample['scene_token']:
+                raise ValueError('Sweep crosses scene boundary')
+            sweep_cs = nusc.get('calibrated_sensor', sweep_sd['calibrated_sensor_token'])
+            if nusc.get('sensor', sweep_cs['sensor_token'])['channel'] != 'LIDAR_TOP':
+                raise ValueError('Non-LiDAR record in sweep history')
+            if (sd_rec['timestamp'] - sweep_sd['timestamp']) / 1e6 > max_sweep_age:
+                break
+            sweep = obtain_sensor2top(nusc, previous, l2e_t, l2e_r_mat, e2g_t, e2g_r_mat)
+            if not Path(sweep['data_path']).is_file():
+                raise FileNotFoundError(sweep['data_path'])
+            info['sweeps'].append(sweep)
+            previous = sweep_sd['prev']
 
         camera_types = [
             'CAM_FRONT',
@@ -151,7 +181,10 @@ def create_vf_infos(root_path="data/nuscenes_vf6_01_5hz", version="v1.0-trainval
             info['prev'] = prev_idx
 
     metadata = {'version': version, 'split': 'custom_val',
-                'ego_motion_available': False, 'velocity_available': False,
+                'ego_motion_available': motion_available, 'velocity_available': False,
+                'max_sweeps': max_sweeps, 'max_sweep_age_seconds': max_sweep_age,
+                'pose_source': pose_report.get('source'),
+                'pose_limitations': pose_report.get('limitations', []),
                 'box_convention': 'MIT legacy: center xyz, wlh, -yaw-pi/2'}
     out_val = {'infos': val_nusc_infos, 'metadata': metadata}
 
@@ -169,5 +202,6 @@ if __name__ == "__main__":
     parser.add_argument("--version", default="v1.0-trainval")
     parser.add_argument("--max-sweeps", type=int, default=0)
     parser.add_argument("--output-name", default="bevfusion_infos_val.pkl")
+    parser.add_argument("--max-sweep-age", type=float, default=1.0)
     args = parser.parse_args()
-    create_vf_infos(args.root_path, args.version, args.max_sweeps, args.output_name)
+    create_vf_infos(args.root_path, args.version, args.max_sweeps, args.output_name, args.max_sweep_age)

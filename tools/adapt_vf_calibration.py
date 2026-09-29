@@ -85,8 +85,12 @@ def adapt(source_root, output_root, reference_root, mode='both', version='v1.0-t
     if output_root.exists(): raise FileExistsError(f'Output already exists: {output_root}; choose a new directory')
     if mode not in ('camera', 'lidar', 'both'): raise ValueError(mode)
     source = read_tables(source_root, version)
-    if not all(np.allclose(e['translation'], 0) and np.allclose(rotation(e['rotation']), np.eye(3)) for e in source['ego_pose']):
-        raise ValueError('This adapter is scoped to the VF identity-ego single-frame export')
+    moving = any(not np.allclose(e['translation'], 0) or not np.allclose(rotation(e['rotation']), np.eye(3)) for e in source['ego_pose'])
+    pose_path = source_root / 'pose_report.json'
+    pose_report = json.loads(pose_path.read_text()) if pose_path.exists() else {}
+    if moving and not pose_report.get('available'):
+        raise ValueError('Moving VF export requires pose_report.json for provenance')
+    motion_available = moving and bool(pose_report.get('available'))
     reference, reference_token = reference_rig(reference_root, reference_version, reference_scene)
     target = copy.deepcopy(source)
     target['calibrated_sensor'] = adapted_calibrations(source, reference, mode)
@@ -97,7 +101,7 @@ def adapt(source_root, output_root, reference_root, mode='both', version='v1.0-t
     report = {'mode': mode, 'source_root': str(source_root), 'reference_root': str(Path(reference_root).resolve()),
               'reference_version': reference_version, 'reference_scene': reference_scene,
               'reference_sample_token': reference_token, 'camera': {}, 'lidar': {},
-              'status': 'building', 'ego_motion_available': False,
+              'status': 'building', 'ego_motion_available': motion_available,
               'notes': ['Camera translation is physical VF, not nuScenes.',
                         'LiDAR is a coordinate change of existing returns, not resimulated rays.',
                         'Missing visibility, density and occlusions cannot be reconstructed.',
@@ -139,10 +143,10 @@ def adapt(source_root, output_root, reference_root, mode='both', version='v1.0-t
     folder = output_root / version; folder.mkdir()
     for name, rows in target.items():
         (folder / (name+'.json')).write_text(json.dumps(rows))
-    (output_root / 'sweeps').mkdir()
+    (output_root / 'sweeps').mkdir(exist_ok=True)
     if (source_root / 'maps').is_dir():
         (output_root / 'maps').symlink_to(os.path.relpath(source_root / 'maps', output_root), target_is_directory=True)
-    for name in ['phenikaa_val_scenes.txt', 'selection_5hz.json', 'annotation_import_stats.json']:
+    for name in ['phenikaa_val_scenes.txt', 'selection_5hz.json', 'annotation_import_stats.json', 'pose_report.json']:
         src = source_root / name
         if src.exists(): (output_root / name).write_bytes(src.read_bytes())
     report.update(status='complete', samples=len(target['sample']), sensor_records=len(target['sample_data']),
@@ -151,7 +155,7 @@ def adapt(source_root, output_root, reference_root, mode='both', version='v1.0-t
     manifest.write_text(json.dumps(report, indent=2))
     (output_root / 'conversion_meta.json').write_text(json.dumps({
         'dataset': 'vf_calibration_ablation', 'source_root': str(source_root),
-        'version': version, 'split': 'custom_val', 'ego_motion_available': False,
+        'version': version, 'split': 'custom_val', 'ego_motion_available': motion_available,
         'calibration_adapter': report}, indent=2))
     print('Created:', output_root)
     print('Next: create_vf_infos.py --root-path', output_root)
