@@ -244,8 +244,15 @@ class TransFusionHead(nn.Module):
             heatmap, kernel_size=self.nms_kernel_size, stride=1, padding=0
         )
         local_max[:, :, padding:(-padding), padding:(-padding)] = local_max_inner
-        ## for Pedestrian & Traffic_cone in nuScenes
-        if self.test_cfg["dataset"] == "nuScenes":
+        # Custom class order can explicitly select classes without spatial NMS.
+        # Absent this option, preserve the original nuScenes/Waymo behavior.
+        exempt_ids = self.test_cfg.get("heatmap_nms_exempt_class_ids")
+        if exempt_ids is not None:
+            for class_id in exempt_ids:
+                if not isinstance(class_id, int) or not 0 <= class_id < heatmap.shape[1]:
+                    raise ValueError("Invalid heatmap NMS exempt class index")
+                local_max[:, class_id] = heatmap[:, class_id]
+        elif self.test_cfg["dataset"] == "nuScenes":
             local_max[
                 :,
                 8,

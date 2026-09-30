@@ -19,10 +19,31 @@ from mmdet.datasets import replace_ImageToTensor
 from mmdet3d.utils import recursive_eval
 
 
+# MMCV 1.x passes integer GPU IDs to a private API changed in PyTorch 2.1.
+from mmcv.utils import digit_version
+
+if digit_version(mmcv.__version__) < digit_version("2.0.0") and digit_version(
+    torch.__version__
+) >= digit_version("2.1.0"):
+    import mmcv.parallel._functions as _mmcv_parallel_functions
+    from torch.nn.parallel._functions import _get_stream as _torch_get_stream
+
+    def _mmcv_get_stream(device):
+        if isinstance(device, int):
+            device = torch.device("cpu") if device == -1 else torch.device("cuda", device)
+        return _torch_get_stream(device)
+
+    _mmcv_parallel_functions._get_stream = _mmcv_get_stream
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="MMDet test (and eval) a model")
     parser.add_argument("config", help="test config file path")
     parser.add_argument("checkpoint", help="checkpoint file")
+    parser.add_argument(
+        "--strict-checkpoint", action="store_true",
+        help="Fail if checkpoint keys or tensor shapes do not match the model",
+    )
     parser.add_argument("--out", help="output result file in pickle format")
     parser.add_argument(
         "--fuse-conv-bn",
@@ -181,7 +202,9 @@ def main():
     fp16_cfg = cfg.get("fp16", None)
     if fp16_cfg is not None:
         wrap_fp16_model(model)
-    checkpoint = load_checkpoint(model, args.checkpoint, map_location="cpu")
+    checkpoint = load_checkpoint(
+        model, args.checkpoint, map_location="cpu", strict=args.strict_checkpoint
+    )
     if args.fuse_conv_bn:
         model = fuse_conv_bn(model)
     # old versions did not save class info in checkpoints, this walkaround is
@@ -200,6 +223,10 @@ def main():
             device_ids=[torch.cuda.current_device()],
             broadcast_buffers=False,
         )
+        # MMCV 1.x reads this legacy DDP flag, removed in newer PyTorch.
+        # Keep the normal module path without overriding older DDP behavior.
+        if not hasattr(model, "_use_replicated_tensor_module"):
+            model._use_replicated_tensor_module = False
         outputs = multi_gpu_test(model, data_loader, args.tmpdir, args.gpu_collect)
 
     rank, _ = get_dist_info()

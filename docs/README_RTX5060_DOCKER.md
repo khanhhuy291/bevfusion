@@ -14,9 +14,11 @@ Máy công ty: Ubuntu 22.04.5, RTX 5060 Laptop GPU 8 GB, driver 595.91.07.
 | Sáu checkpoint GRM/PRM | Test nạp trọng số và forward trên CPU đạt |
 | Image `bevfusion-blackwell:deps` | Đã build thành công; MMCV-full 1.7.2, MMDetection 2.28.2, import dependency và pip check đạt |
 | CUDA operator MMCV | Người dùng xác nhận `MMCV CUDA NMS OK` trên RTX 5060 |
-| GRM/PRM trên GPU | Chưa xác nhận forward model trên GPU |
+| GRM/PRM trên GPU | Log người dùng xác nhận full pipeline với `--device cuda`: sáu checkpoint khớp key, 209 track processed, 119 insufficient_points trên tổng 328 track |
 | Build CUDA extensions BEVFusion | Log người dùng xác nhận đã tạo/copy đủ 12 extension; NVCC dùng `sm_120` |
-| BEVFusion detection trên RTX 5060 | **Chưa chạy inference; còn kiểm tra import, CUDA operator và model** |
+| BEVFusion import và operator | Người dùng xác nhận registry, BEV pooling, voxelization, sparse convolution và NMS đạt |
+| BEVFusion detection trên RTX 5060 | **Log người dùng xác nhận hoàn tất mini val 81/81: mAP 0.5811, NDS 0.5823; đã xuất predictions.pkl và results_nusc.json** |
+| DetZero tracking trên kết quả mini | Log người dùng xác nhận 2 scene (41 + 40 frame), 328 track, 3451 matched box; `tracking_only: 328`, chạy CPU trong container detection |
 
 `GPU COMPUTE OK` xác nhận PyTorch chạy GPU, không xác nhận mọi CUDA
 operator của BEVFusion đã hoạt động. Một test bị skip vì chưa có torchpack
@@ -178,7 +180,7 @@ thi sparse convolution, voxelization, BEV pooling, NMS trên GPU. Chỉ đặt
 `TORCH_CUDA_ARCH_LIST=12.0` không đủ với setup.py cũ ghi cứng `-gencode`;
 cần cập nhật bản sửa build ở mục 6 trước.
 Không cài MMCV mới nhất hoặc chạy `python setup.py develop` rồi coi đó là
-cách sửa đầy đủ. Chưa có bộ dependency BEVFusion đã xác nhận trên máy này.
+cách sửa đầy đủ. Bộ dependency và bản sửa đã chạy mini detection được ghi ở mục 5–7.
 
 Các lệnh ở mục 7 là quy trình chạy **sau khi bước port/build đạt**, không
 phải lệnh hoàn tất cài đặt image base hiện tại.
@@ -190,9 +192,9 @@ Sau khi xác nhận data/checkpoint đủ và năm module `mmcv`, `mmdet`,
 dependency riêng. File [Dockerfile.blackwell-deps](../docker/Dockerfile.blackwell-deps)
 dùng MMCV-full 1.7.2 và MMDetection 2.28.2. Người dùng đã cung cấp log
 build thành công trên máy công ty: MMCV biên dịch từ source, `pip check`
-đạt và `Dependency imports OK 1.7.2 2.28.2`. NMS MMCV đã chạy trên GPU,
-nhưng chưa chạy model BEVFusion; không phải bộ phiên bản gốc hay bản nâng cấp
-đã bảo đảm tương đương checkpoint.
+đạt và `Dependency imports OK 1.7.2 2.28.2`. NMS MMCV và model BEVFusion
+đã chạy trên GPU sau các bản sửa ở mục 6–7. Đây là bộ phiên bản port;
+chưa đối chiếu số học với môi trường gốc.
 
 Dockerfile giữ các phiên bản package base qua pip constraints, build MMCV
 từ source cho `sm_120`, và kiểm tra import. Nó chưa build operator BEVFusion.
@@ -235,7 +237,8 @@ ghi cứng `-gencode`; mặc định vẫn giữ 7.0/7.5/8.0/8.6 cho luồng cũ
 Hai chỗ gọi Tensor.type() cũ được thay bằng scalar_type()/is_cuda().
 Người dùng đã gửi log build hoàn tất, copy đủ 12 file extension và có cờ
 `-gencode=arch=compute_120,code=sm_120`. Các warning `Tensor.data<T>()`
-deprecated chưa làm build thất bại. Chưa xác nhận thực thi operator/model.
+deprecated chưa làm build thất bại. Operator và mini detection đã chạy đạt
+sau các bản sửa Python ở mục 7.
 Máy công ty cần nhận các thay đổi code này trước khi chạy lệnh dưới.
 
 Trong container **bevfusion-detection**:
@@ -256,6 +259,10 @@ chúng sang Mac hoặc dùng với bộ PyTorch khác. Lỗi build cần xử l�
 khi chạy tiếp; xem `tail -n 100 outputs/mini-blackwell/build-bevfusion.log`.
 
 ## 7. Detection mini validation sau khi BEVFusion đã sẵn sàng
+
+Sau bản sửa registry, người dùng đã xác nhận `BEVFusion imports + registry OK`
+và `BEVFUSION CUDA CHECKS OK` (BEV pooling, voxelization, sparse convolution,
+NMS). Các kiểm tra nhỏ này không thay thế việc chạy model đầy đủ.
 
 Lần kiểm tra import đầu tiên sau build bị lỗi `SparseConv2d is already
 registered in conv layer`: MMCV 1.7 đã đăng ký các lớp cùng tên. Bản sửa
@@ -293,25 +300,76 @@ PY
 
 Đầu ra là `data/nuscenes/nuscenes_infos_train.pkl` và
 `data/nuscenes/nuscenes_infos_val.pkl`. Chạy bằng OpenMPI/torchpack một GPU,
-batch size 1, một worker; không đổi độ phân giải/voxel/checkpoint để né lỗi:
+batch size 1, nạp dữ liệu trong tiến trình chính (`workers_per_gpu=0`);
+không đổi độ phân giải/voxel/checkpoint để né lỗi:
 
 ```bash
 mkdir -p outputs/mini-blackwell
 set -o pipefail
 export OMP_NUM_THREADS=2
+# Checkpoint pretrained/bevfusion-det.pth đã được người dùng cung cấp/tin cậy.
+# Cho phép MMCV cũ đọc metadata checkpoint với PyTorch >=2.6.
+export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 torchpack dist-run -np 1 python tools/test.py \
   configs/nuscenes/det/transfusion/secfpn/camera+lidar/swint_v0p075/convfuser.yaml \
   pretrained/bevfusion-det.pth \
   --eval bbox \
   --out outputs/mini-blackwell/predictions.pkl \
   --eval-options jsonfile_prefix=outputs/mini-blackwell \
-  --cfg-options data.samples_per_gpu=1 data.test.samples_per_gpu=1 data.workers_per_gpu=1 data.test.load_interval=1 model.encoders.camera.backbone.init_cfg=None \
+  --cfg-options data.samples_per_gpu=1 data.test.samples_per_gpu=1 data.workers_per_gpu=0 data.test.load_interval=1 model.encoders.camera.backbone.init_cfg=None \
   2>&1 | tee outputs/mini-blackwell/detection.log
 ```
 
-Đây là lần chạy dự kiến, chưa được thực thi trên RTX 5060. Chưa bảo đảm
-VRAM 8 GB đủ; nếu OOM, giữ log để xác định bước và dung lượng bộ nhớ.
-Nếu checkpoint thiếu/sai shape nhiều key, dừng và xử lý tương thích trước.
+Lần chạy đầu với một DataLoader worker bị SIGABRT trong libfabric tại
+`fork()`. Nghi vấn là tạo worker sau khi MPI khởi tạo; thử lại với
+`workers_per_gpu=0` để tránh fork từ DataLoader. Log chạy lại đã qua bước
+nạp dữ liệu và checkpoint, nhưng dừng ở lỗi DDP dưới đây trước sample đầu tiên.
+Tham khảo [Open MPI về fork](https://docs.open-mpi.org/en/v5.0.x/tuning-apps/fork-system-popen.html).
+
+Với MMCV 1.7.2/PyTorch 2.7.1, có thể gặp
+`AttributeError: 'MMDistributedDataParallel' object has no attribute '_use_replicated_tensor_module'`.
+`tools/test.py` bổ sung cờ này bằng `False` nếu thiếu, ngay sau khi tạo
+MMDistributedDataParallel, để MMCV gọi module thường. Giữ nguyên cờ nếu
+PyTorch cũ đã có. Đây là sửa Python, không cần build CUDA hay Docker lại.
+Bản sửa đã kiểm tra cú pháp và hai nhánh có/không có thuộc tính trên máy local;
+log người dùng sau khi thêm cả sửa scatter bên dưới đã xác nhận detection hoàn tất. Tham khảo
+[MMCV 1.7.2 DDP forward](https://github.com/open-mmlab/mmcv/blob/v1.7.2/mmcv/parallel/distributed.py).
+
+Log sau sửa DDP đã qua lỗi thiếu thuộc tính, nhưng dừng khi scatter dữ liệu:
+`AttributeError: 'int' object has no attribute 'type'` trong `_get_stream`.
+MMCV 1.x truyền ID GPU dạng số, còn PyTorch >=2.1 nhận `torch.device`.
+`tools/test.py` điều chỉnh tham chiếu `_get_stream` của MMCV trong tiến trình
+test: đổi ID số sang device, giữ nguyên device có sẵn, và gọi hàm gốc của
+PyTorch để giữ cơ chế tạo/cache stream. Chỉ bật với MMCV <2 và PyTorch >=2.1;
+không ghi đè file thư viện trong `/opt/venv`. Không cần build lại extension.
+Đã kiểm tra cú pháp và chuyển đổi đối số local; log người dùng ngày 2026-09-30
+xác nhận detection thực tế hoàn tất sau bản sửa này.
+
+Đã chạy hết mini validation 81/81 trên RTX 5060 Laptop 8 GB với cấu hình
+trên: mAP 0.5811, NDS 0.5823, mATE 0.4057, mASE 0.4462,
+mAOE 0.4769, mAVE 0.4334, mAAE 0.3200. Đây là kết quả từ log người dùng;
+không phải xác nhận training. Lần chạy DetZero sau đó đã xác nhận GRM/PRM
+trên GPU: 209 track processed, 119 track insufficient_points. Đánh giá từ
+log người dùng: mAP 0.5811 → 0.5776, NDS 0.5823 → 0.5804;
+mATE 0.4057 → 0.4095, mASE 0.4462 → 0.4566,
+mAOE 0.4769 → 0.4632, mAVE 0.4334 → 0.4346, mAAE giữ 0.3200.
+Góc quay cải thiện nhưng tổng thể chưa vượt baseline detection; chưa đánh
+giá chất lượng tracking (ID/association). Với `--size_policy auto`, báo cáo
+ghi 158 GRM accepted, 51 rejected_using_prior và 209 PRM applied.
+Accepted chỉ có nghĩa qua ngưỡng kích thước, không chứng minh tốt hơn GT.
+Đối chứng `geometry + auto` từ log người dùng: mAP 0.5809, NDS 0.5812,
+mATE 0.4058, mASE 0.4566, mAOE 0.4769, mAVE 0.4334.
+So với geometry, thêm PRM trong full giảm mAP/NDS và tăng sai số vị trí,
+nhưng giảm sai số góc quay. Geometry đã tăng sai số kích thước so với
+baseline; chưa tách tác động GRM khỏi việc dùng median kích thước khi
+`auto` từ chối GRM. Đối chứng tiếp theo phù hợp là
+`--refinement geometry --size_policy detector_prior` (median kích thước,
+không chạy GRM/PRM), với thư mục output riêng.
+Track có tổng điểm crop dưới 10 được
+giữ box tracking đầu vào, không chạy refiner; không tính là refine thành công.
+Log có cảnh báo `destroy_process_group() was not called` khi thoát,
+sau khi đã lưu prediction và in metric; cần phân biệt với lỗi inference.
+Con số 70 task/s trong log thuộc bước đổi định dạng detection, không phải FPS model.
 
 Kết quả mong đợi: `predictions.pkl`, `results_nusc.json`,
 `metrics_summary.json`, `detection.log` trong `outputs/mini-blackwell`.
