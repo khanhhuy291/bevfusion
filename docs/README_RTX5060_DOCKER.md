@@ -13,9 +13,10 @@ Máy công ty: Ubuntu 22.04.5, RTX 5060 Laptop GPU 8 GB, driver 595.91.07.
 | DetZero integration | Người dùng xác nhận test đạt sau khi sửa dtype của frame rỗng |
 | Sáu checkpoint GRM/PRM | Test nạp trọng số và forward trên CPU đạt |
 | Image `bevfusion-blackwell:deps` | Đã build thành công; MMCV-full 1.7.2, MMDetection 2.28.2, import dependency và pip check đạt |
-| CUDA operator MMCV | Chưa xác nhận chạy NMS trên GPU |
+| CUDA operator MMCV | Người dùng xác nhận `MMCV CUDA NMS OK` trên RTX 5060 |
 | GRM/PRM trên GPU | Chưa xác nhận forward model trên GPU |
-| BEVFusion detection trên RTX 5060 | **Chưa sẵn sàng: chưa port/build CUDA extensions riêng của repo và kiểm tra model** |
+| Build CUDA extensions BEVFusion | Log người dùng xác nhận đã tạo/copy đủ 12 extension; NVCC dùng `sm_120` |
+| BEVFusion detection trên RTX 5060 | **Chưa chạy inference; còn kiểm tra import, CUDA operator và model** |
 
 `GPU COMPUTE OK` xác nhận PyTorch chạy GPU, không xác nhận mọi CUDA
 operator của BEVFusion đã hoạt động. Một test bị skip vì chưa có torchpack
@@ -25,6 +26,18 @@ không có nghĩa môi trường BEVFusion đã hoàn tất.
 
 Các lệnh trong mục này chạy ở Terminal Ubuntu, bên ngoài container.
 Không cần kích hoạt Conda `(base)` để dùng Docker.
+
+**Dùng `bevfusion-detection` cho bước BEVFusion.** Container này đã có đủ
+dependency và NMS chạy GPU thành công. `bevfusion-work` vẫn dùng image
+base/DetZero, không tự nhận package từ image mới.
+
+```bash
+sudo docker start -ai bevfusion-detection
+```
+
+Nếu container detection đang `Up`, dùng `sudo docker exec -it
+bevfusion-detection /bin/bash`. Các lệnh `bevfusion-work` bên dưới chỉ dành
+cho môi trường base cũ.
 
 Xem container đang chạy hay đã dừng:
 
@@ -162,11 +175,12 @@ PyTorch 1.10/CUDA 11.3, không phải hướng cài đặt cho RTX 5060.
 Cần hoàn tất một bước port riêng: xác định bản MMCV/MMDetection tương thích,
 sửa API C++/PyTorch cũ nếu cần, build kernel cho `sm_120`, và kiểm tra thực
 thi sparse convolution, voxelization, BEV pooling, NMS trên GPU. Chỉ đặt
-`TORCH_CUDA_ARCH_LIST=12.0` không đủ vì `setup.py` hiện ghi cứng `-gencode`.
+`TORCH_CUDA_ARCH_LIST=12.0` không đủ với setup.py cũ ghi cứng `-gencode`;
+cần cập nhật bản sửa build ở mục 6 trước.
 Không cài MMCV mới nhất hoặc chạy `python setup.py develop` rồi coi đó là
 cách sửa đầy đủ. Chưa có bộ dependency BEVFusion đã xác nhận trên máy này.
 
-Các lệnh ở mục 6 là quy trình chạy **sau khi bước port/build đạt**, không
+Các lệnh ở mục 7 là quy trình chạy **sau khi bước port/build đạt**, không
 phải lệnh hoàn tất cài đặt image base hiện tại.
 
 ## 5. Build dependency thử nghiệm cho BEVFusion
@@ -176,8 +190,8 @@ Sau khi xác nhận data/checkpoint đủ và năm module `mmcv`, `mmdet`,
 dependency riêng. File [Dockerfile.blackwell-deps](../docker/Dockerfile.blackwell-deps)
 dùng MMCV-full 1.7.2 và MMDetection 2.28.2. Người dùng đã cung cấp log
 build thành công trên máy công ty: MMCV biên dịch từ source, `pip check`
-đạt và `Dependency imports OK 1.7.2 2.28.2`. Chưa kiểm tra CUDA operator
-trên GPU hoặc model BEVFusion; không phải bộ phiên bản gốc hay bản nâng cấp
+đạt và `Dependency imports OK 1.7.2 2.28.2`. NMS MMCV đã chạy trên GPU,
+nhưng chưa chạy model BEVFusion; không phải bộ phiên bản gốc hay bản nâng cấp
 đã bảo đảm tương đương checkpoint.
 
 Dockerfile giữ các phiên bản package base qua pip constraints, build MMCV
@@ -214,7 +228,41 @@ Còn phải port/build operator BEVFusion và kiểm tra model trước mục ti
 Container `bevfusion-work` vẫn dùng image base cũ; build image mới không tự
 thay môi trường của container đó.
 
-## 6. Detection mini validation sau khi BEVFusion đã sẵn sàng
+## 6. Build extension riêng của BEVFusion
+
+Bản sửa trong repo cho phép `setup.py` nhận `TORCH_CUDA_ARCH_LIST`, thay vì
+ghi cứng `-gencode`; mặc định vẫn giữ 7.0/7.5/8.0/8.6 cho luồng cũ.
+Hai chỗ gọi Tensor.type() cũ được thay bằng scalar_type()/is_cuda().
+Người dùng đã gửi log build hoàn tất, copy đủ 12 file extension và có cờ
+`-gencode=arch=compute_120,code=sm_120`. Các warning `Tensor.data<T>()`
+deprecated chưa làm build thất bại. Chưa xác nhận thực thi operator/model.
+Máy công ty cần nhận các thay đổi code này trước khi chạy lệnh dưới.
+
+Trong container **bevfusion-detection**:
+
+```bash
+cd /workspace/bevfusion
+export TORCH_CUDA_ARCH_LIST=12.0
+export MAX_JOBS=2
+mkdir -p outputs/mini-blackwell
+set -o pipefail
+python setup.py build_ext --inplace 2>&1 | tee outputs/mini-blackwell/build-bevfusion.log
+```
+
+`build_ext --inplace` đặt extension cạnh mã nguồn trong bind mount, không
+cần ghi vào venv do root sở hữu. PYTHONPATH đã trỏ vào repo. File `.so`
+này phụ thuộc Linux/Python/PyTorch/CUDA của môi trường build; không copy
+chúng sang Mac hoặc dùng với bộ PyTorch khác. Lỗi build cần xử lý trước
+khi chạy tiếp; xem `tail -n 100 outputs/mini-blackwell/build-bevfusion.log`.
+
+## 7. Detection mini validation sau khi BEVFusion đã sẵn sàng
+
+Lần kiểm tra import đầu tiên sau build bị lỗi `SparseConv2d is already
+registered in conv layer`: MMCV 1.7 đã đăng ký các lớp cùng tên. Bản sửa
+trong `mmdet3d/ops/spconv/conv.py` dùng `force=True` cho 10 lớp sparse của
+repo, để registry chọn đúng implementation đi cùng SparseConvTensor,
+CUDA extension và checkpoint của repo. Không thay bằng spconv của MMCV.
+Đây là sửa Python, không cần build lại `.so`; chạy Python mới để kiểm tra.
 
 Trong container, kiểm tra import; nếu thất bại thì dừng ở đây:
 
