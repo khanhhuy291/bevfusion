@@ -89,13 +89,9 @@ class IntegrationTests(unittest.TestCase):
         for i in range(5):
             names = ['car','truck'] if i in (1,2,3) else []
             frames[str(i)] = {'boxes_global': np.array([[10,0,1,4,2,2,0]]*len(names), dtype=np.float32).reshape(-1,7),
-<<<<<<< HEAD
                              # Match bridge.prepare(), including string dtype on empty frames.
                              'name': np.array(['Vehicle']*len(names), dtype=str),
                              'nusc_name': np.array(names, dtype=str),
-=======
-                             'name': np.array(['Vehicle']*len(names), dtype=str), 'nusc_name': np.array(names, dtype=str),
->>>>>>> 8a87035 (update)
                              'score': np.full(len(names), .8), 'source_index': np.arange(len(names)),
                              'pose': np.eye(4), 'timestamp': i*.2}
         tracks = r.run_tracking({'frames': {'s': frames}, 'classes': ['car','truck']}, CFG, 'cpu')
