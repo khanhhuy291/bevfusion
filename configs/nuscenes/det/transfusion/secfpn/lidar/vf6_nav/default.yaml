@@ -1,0 +1,87 @@
+dataset_root: data/nuscenes_vf6_01_5hz_nav_calib/
+
+vf_sweeps: 0
+
+voxel_size: [0.075, 0.075, 0.2]
+point_cloud_range: [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
+
+model:
+  encoders:
+    camera: null
+    lidar:
+      voxelize:
+        max_num_points: 10
+        point_cloud_range: ${point_cloud_range}
+        voxel_size: ${voxel_size}
+        max_voxels: [120000, 160000]
+      backbone:
+        type: SparseEncoder
+        in_channels: 5
+        sparse_shape: [1440, 1440, 41]
+        output_channels: 128
+        order:
+          - conv
+          - norm
+          - act
+        encoder_channels:
+          - [16, 16, 32]
+          - [32, 32, 64]
+          - [64, 64, 128]
+          - [128, 128]
+        encoder_paddings:
+          - [0, 0, 1]
+          - [0, 0, 1]
+          - [0, 0, [1, 1, 0]]
+          - [0, 0]
+        block_type: basicblock
+  fuser: null
+  heads:
+    object:
+      train_cfg:
+        grid_size: [1440, 1440, 41]
+      test_cfg:
+        grid_size: [1440, 1440, 41]
+
+test_pipeline:
+  -
+    type: LoadPointsFromFile
+    coord_type: LIDAR
+    load_dim: ${load_dim}
+    use_dim: ${use_dim}
+    reduce_beams: ${reduce_beams}
+    load_augmented: ${load_augmented}
+  -
+    type: LoadPointsFromMultiSweeps
+    sweeps_num: ${vf_sweeps}
+    test_mode: true
+    load_dim: ${load_dim}
+    use_dim: ${use_dim}
+    reduce_beams: ${reduce_beams}
+    pad_empty_sweeps: false
+    remove_close: true
+    load_augmented: ${load_augmented}
+  -
+    type: PointsRangeFilter
+    point_cloud_range: ${point_cloud_range}
+  -
+    type: DefaultFormatBundle3D
+    classes: ${object_classes}
+  -
+    type: Collect3D
+    keys:
+      - points
+    meta_keys:
+      - lidar2ego
+      - lidar_aug_matrix
+
+data:
+  samples_per_gpu: 1
+  workers_per_gpu: 0
+  test:
+    ann_file: ${dataset_root + "bevfusion_infos_val.pkl"}
+    load_interval: 1
+    test_mode: true
+  val:
+    ann_file: ${dataset_root + "bevfusion_infos_val.pkl"}
+    load_interval: 1
+    test_mode: true

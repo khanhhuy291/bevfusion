@@ -68,12 +68,14 @@ def create_vf_infos(root_path="data/nuscenes_vf6_01_5hz", version="v1.0-trainval
     nusc = NuScenes(version=version, dataroot=root_path, verbose=True)
     pose_path = Path(root_path) / 'pose_report.json'
     pose_report = json.loads(pose_path.read_text()) if pose_path.exists() else {}
+    conv_meta_path = Path(root_path) / 'conversion_meta.json'
+    conv_meta = json.loads(conv_meta_path.read_text()) if conv_meta_path.exists() else {}
     moving = any(not np.allclose(p['translation'], 0) or
                  not np.allclose(Quaternion(p['rotation']).rotation_matrix, np.eye(3))
                  for p in nusc.ego_pose)
-    motion_available = bool(pose_report.get('available')) and moving
+    motion_available = (bool(pose_report.get('available')) or bool(conv_meta.get('global_coord_mode'))) and moving
     if max_sweeps and not motion_available:
-        raise ValueError('Sweeps require measured poses and pose_report.json available=true')
+        raise ValueError('Sweeps require measured poses and pose_report.json or conversion_meta.json available')
 
     val_nusc_infos = []
     token2idx = {}
@@ -183,7 +185,7 @@ def create_vf_infos(root_path="data/nuscenes_vf6_01_5hz", version="v1.0-trainval
     metadata = {'version': version, 'split': 'custom_val',
                 'ego_motion_available': motion_available, 'velocity_available': False,
                 'max_sweeps': max_sweeps, 'max_sweep_age_seconds': max_sweep_age,
-                'pose_source': pose_report.get('source'),
+                'pose_source': pose_report.get('source', conv_meta.get('global_coord_mode', 'unknown')),
                 'pose_limitations': pose_report.get('limitations', []),
                 'box_convention': 'MIT legacy: center xyz, wlh, -yaw-pi/2'}
     out_val = {'infos': val_nusc_infos, 'metadata': metadata}

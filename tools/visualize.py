@@ -104,7 +104,7 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--result", type=str, default=None,
                         help="Path to results JSON (nuScenes detection/tracking format)")
-    parser.add_argument("--split", type=str, default="val", choices=["train", "val"])
+    parser.add_argument("--split", type=str, default="val", choices=["train", "val", "test"])
     parser.add_argument("--bbox-classes", nargs="+", type=int, default=None)
     parser.add_argument("--bbox-score", type=float, default=None)
     parser.add_argument("--map-score", type=float, default=0.5)
@@ -119,6 +119,10 @@ def main() -> None:
     torch.backends.cudnn.benchmark = cfg.cudnn_benchmark
     if torch.cuda.is_available():
         torch.cuda.set_device(dist.local_rank() if is_dist else 0)
+
+    # Force test_mode = True so DataLoader uses prepare_test_data without requiring gt_labels_3d
+    if args.split in cfg.data:
+        cfg.data[args.split].test_mode = True
 
     # build the dataloader
     dataset = build_dataset(cfg.data[args.split])

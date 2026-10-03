@@ -9,24 +9,34 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser(description="Create demo video from BEVFusion visualization frames")
+    parser.add_argument("--data-root", type=str, default="data/nuscenes",
+                        help="Path to dataset root (e.g., data/nuscenes_vf6_01_5hz_nav_calib)")
     parser.add_argument("--viz-dir", type=str, default="outputs/mini-viz",
                         help="Path to folder containing camera-0..5 and lidar subfolders")
     parser.add_argument("--output-dir", type=str, default="outputs/demo-videos",
                         help="Output directory for generated mp4 videos")
     parser.add_argument("--prefix", type=str, default="scene",
                         help="Prefix for output video files (e.g., 'scene' or 'scene_detzero')")
-    parser.add_argument("--fps", type=float, default=2.0, help="Frames per second")
+    parser.add_argument("--fps", type=float, default=5.0, help="Frames per second")
     args = parser.parse_args()
 
-    root_path = Path("data/nuscenes")
-    val_info_path = root_path / "nuscenes_infos_val.pkl"
-    sample_json_path = root_path / "v1.0-mini/sample.json"
+    root_path = Path(args.data_root)
+    val_info_path = root_path / "bevfusion_infos_val.pkl"
+    if not val_info_path.exists():
+        val_info_path = root_path / "nuscenes_infos_val.pkl"
+
+    sample_json_path = root_path / "v1.0-trainval/sample.json"
+    if not sample_json_path.exists():
+        sample_json_path = root_path / "v1.0-mini/sample.json"
+    if not sample_json_path.exists():
+        sample_json_path = root_path / "sample.json"
+
     viz_dir = Path(args.viz_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not sample_json_path.exists():
-        raise FileNotFoundError(f"Missing sample.json at {sample_json_path}")
+        raise FileNotFoundError(f"Missing sample.json under {root_path}")
 
     # 1. Map sample_token -> scene_token and sample details from sample.json
     samples_raw = json.loads(sample_json_path.read_text())
