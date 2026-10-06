@@ -95,6 +95,8 @@ def main():
     p.add_argument('--version', default='v1.0-trainval')
     p.add_argument('--baseline', required=True)
     p.add_argument('--refined')
+    p.add_argument('--baseline-data-root', help='Data root for baseline if different from --data-root')
+    p.add_argument('--baseline-version', help='Version for baseline if different from --version')
     p.add_argument('--classes', default='car,motorcycle,pedestrian')
     p.add_argument('--include-zero-points', action='store_true', help='Sensitivity check using GT boxes with copied zero point counts')
     p.add_argument('--output', default='outputs/vf6_01_5hz/comparison.json')
@@ -102,12 +104,17 @@ def main():
     classes = a.classes.split(',')
     if not classes or set(classes) - set(RANGES) or len(set(classes)) != len(classes): raise ValueError('Unsupported or duplicate classes')
     report = {}
-    for name, path in [('baseline', a.baseline), ('refined', a.refined)]:
-        if path:
-            report[name] = evaluate(a.data_root, a.version, path, classes, a.include_zero_points)
-            print(name, 'custom_mAP:', report[name]['custom_mAP'])
-            for cls, metrics in report[name]['per_class'].items(): print(' ', cls, metrics)
-    if a.refined: report['delta_custom_mAP'] = report['refined']['custom_mAP'] - report['baseline']['custom_mAP']
+    b_root = a.baseline_data_root or a.data_root
+    b_version = a.baseline_version or a.version
+    if a.baseline:
+        report['baseline'] = evaluate(b_root, b_version, a.baseline, classes, a.include_zero_points)
+        print('baseline custom_mAP:', report['baseline']['custom_mAP'])
+        for cls, metrics in report['baseline']['per_class'].items(): print(' ', cls, metrics)
+    if a.refined:
+        report['refined'] = evaluate(a.data_root, a.version, a.refined, classes, a.include_zero_points)
+        print('refined custom_mAP:', report['refined']['custom_mAP'])
+        for cls, metrics in report['refined']['per_class'].items(): print(' ', cls, metrics)
+    if a.refined and a.baseline: report['delta_custom_mAP'] = report['refined']['custom_mAP'] - report['baseline']['custom_mAP']
     out = Path(a.output); out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2, allow_nan=False))
     print('Saved:', out)
