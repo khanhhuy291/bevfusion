@@ -103,6 +103,8 @@ def validate(root, version='v1.0-trainval', infos=None, full=False):
         allowed_roots = [root]
         if meta.get('dataset') == 'vf_calibration_ablation':
             allowed_roots.append(Path(meta['source_root']).resolve())
+        if meta.get('ablation_source'):
+            allowed_roots.append(Path(meta['ablation_source']).resolve())
         for item in data['infos']:
             ages = [(item['timestamp'] - s['timestamp']) / 1e6 for s in item['sweeps']]
             assert all(a > 0 for a in ages), 'future or duplicate-current sweep'

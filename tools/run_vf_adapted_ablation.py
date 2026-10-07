@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Four VF adapted ablations; uses scene-local UTM and the custom VF evaluator."""
+"""Four VF ablations; preserves source images/calibration and uses scene-local UTM."""
 import argparse
 import csv
 import json
@@ -65,6 +65,8 @@ def localize(source, target):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--data-root', default=str(SOURCE),
+                        help='Source VF nuScenes dataset; images and calibration are preserved')
     parser.add_argument('--sweeps', type=int, choices=[0, 1, 2], default=2)
     parser.add_argument('--output-dir', default='outputs/vf-adapted-sweeps2-01')
     parser.add_argument('--legacy-center-correction', action='store_true',
@@ -74,10 +76,11 @@ def main():
     a = parser.parse_args()
     tracking_classes = 'car,truck,motorcycle,pedestrian' if a.car_includes_truck else 'car,motorcycle,pedestrian'
     os.chdir(ROOT)
+    source = Path(a.data_root).resolve()
     output = Path(a.output_dir).resolve()
     if output.exists() and any(output.iterdir()):
         raise FileExistsError(f'Choose a NEW output directory; existing run is preserved: {output}')
-    for path in [SOURCE / VERSION / 'sample.json', ROOT / CONFIG,
+    for path in [source / VERSION / 'sample.json', ROOT / CONFIG,
                  ROOT / 'pretrained/bevfusion-det.pth', *[
                      ROOT / f'DetZero-main-2/checkpoints/{c}_{s}_model.pth'
                      for c in ['vehicle', 'pedestrian', 'cyclist'] for s in ['grm', 'prm']]]:
@@ -104,16 +107,21 @@ def main():
 
     py = sys.executable
     run('preflight', [py, '-c', "import torch, mmcv, mmdet, torchpack, filterpy, shapely, nuscenes; from mpi4py import MPI; from mmdet3d.models import build_model; assert torch.cuda.is_available(), 'CUDA unavailable'; print('GPU:', torch.cuda.get_device_name(0))"])
+    run('data_audit', [py, 'tools/validate_nuscenes_data.py', '--data-root', str(source),
+                       '--version', VERSION, '--output', str(output / 'source_data_audit.json')])
     dataset = output / 'dataset_local'
-    localize(SOURCE, dataset)
+    localize(source, dataset)
     (output / 'experiment.json').write_text(json.dumps({
-        'source': str(SOURCE), 'dataset': str(dataset), 'version': VERSION,
+        'source': str(source), 'dataset': str(dataset), 'version': VERSION,
         'sweeps': a.sweeps, 'checkpoint': 'pretrained/bevfusion-det.pth',
         'size_policy': 'grm', 'center_convention': 'mit-legacy-center-as-bottom',
         'tracking_classes': tracking_classes.split(','), 'car_includes_truck': a.car_includes_truck,
         'evaluation': 'custom VF AP/TP, three annotated classes; no NDS'}, indent=2))
     run('infos', [py, 'tools/data_converter/create_vf_infos.py', '--root-path', str(dataset),
                   '--version', VERSION, '--max-sweeps', str(a.sweeps), '--max-sweep-age', '1.0'])
+    run('infos_audit', [py, 'tools/validate_nuscenes_data.py', '--data-root', str(dataset),
+                        '--version', VERSION, '--infos', str(dataset / 'bevfusion_infos_val.pkl'),
+                        '--output', str(output / 'infos_data_audit.json')])
     baseline_dir = output / 'baseline'; baseline_dir.mkdir()
     run('detection', ['torchpack', 'dist-run', '-np', '1', py, 'tools/test.py', CONFIG,
                      'pretrained/bevfusion-det.pth', '--format-only',

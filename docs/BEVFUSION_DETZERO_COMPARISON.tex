@@ -1,0 +1,53 @@
+\documentclass[a4paper,11pt]{article}
+\usepackage[margin=1.8cm]{geometry}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\begin{document}
+
+\begin{table}[htbp]
+\centering
+\caption{BEVFusion and DetZero ablation results on nuScenes mini and VF.
+AP and NDS are percentages; deltas are percentage points relative to BEVFusion.}
+\label{tab:bevfusion-detzero}
+\renewcommand{\arraystretch}{1.2}
+\setlength{\tabcolsep}{6pt}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llrrrrr}
+\toprule
+\textbf{Method} & \textbf{Modality}
+& \multicolumn{3}{c}{\textbf{nuScenes mini (mini\_val)}}
+& \multicolumn{2}{c}{\textbf{VF (custom evaluation)}} \\
+\cmidrule(lr){3-5}\cmidrule(lr){6-7}
+& & mAP $\uparrow$ & NDS $\uparrow$ & $\Delta$ mAP
+& Custom mAP $\uparrow$ & $\Delta$ mAP \\
+\midrule
+BEVFusion & C+L
+& \textbf{58.1613} & \textbf{58.2730} & 0.0000
+& 47.3263 & 0.0000 \\
+BEVFusion + Tracking & C+L
+& 58.1470 & 58.2656 & $-0.0143$
+& 47.3192 & $-0.0070$ \\
+BEVFusion + Tracking + GRM & C+L
+& 58.1470 & 58.0301 & $-0.0143$
+& 47.3192 & $-0.0070$ \\
+BEVFusion + Tracking + GRM + PRM & C+L
+& 57.8247 & 57.9642 & $-0.3366$
+& \textbf{47.3864} & $+0.0601$ \\
+\bottomrule
+\end{tabular}%
+}
+\vspace{4pt}
+\begin{minipage}{\textwidth}
+\footnotesize
+C: camera; L: LiDAR. Modality describes detector inputs.
+Bold values mark the best result within each metric column.
+nuScenes results use the standard detection evaluator on 81 mini\_val samples.
+VF results use the custom three-class protocol on 156 frames:
+Car $\mapsto$ car, Rider $\mapsto$ motorcycle, Pedestrian $\mapsto$ pedestrian.
+These VF results precede the new car+truck evaluation protocol.
+The two datasets use different evaluation protocols, so compare methods within
+each dataset. VF NDS, MACs and latency were not measured and are omitted.
+\end{minipage}
+\end{table}
+
+\end{document}
