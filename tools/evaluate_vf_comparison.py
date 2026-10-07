@@ -19,7 +19,8 @@ CLASS_MAP = {'vehicle.car': 'car', 'vehicle.motorcycle': 'motorcycle',
 RANGES = {'car': 50, 'motorcycle': 40, 'pedestrian': 40}
 
 
-def evaluate(root, version, prediction_path, classes, include_zero_points=False):
+def evaluate(root, version, prediction_path, classes, include_zero_points=False,
+             car_includes_truck=False):
     root = Path(root)
     def table(name):
         return {x['token']: x for x in json.loads((root / version / f'{name}.json').read_text())}
@@ -33,9 +34,10 @@ def evaluate(root, version, prediction_path, classes, include_zero_points=False)
     if set(raw['results']) != set(samples):
         raise ValueError('Custom evaluation requires exactly all dataset sample tokens, including empty predictions')
     gt_by_sample = {token: [] for token in samples}
-    counts, removed, ignored_pred = Counter(), Counter(), Counter()
+    counts, removed, ignored_pred, remapped_pred = Counter(), Counter(), Counter(), Counter()
     for a in annotations.values():
-        name = CLASS_MAP.get(categories[instances[a['instance_token']]['category_token']]['name'])
+        category = categories[instances[a['instance_token']]['category_token']]['name']
+        name = 'car' if car_includes_truck and category == 'vehicle.truck' else CLASS_MAP.get(category)
         if name not in classes: continue
         if not include_zero_points and a['num_lidar_pts'] == 0:
             removed['gt_zero_points'] += 1; continue
@@ -56,6 +58,9 @@ def evaluate(root, version, prediction_path, classes, include_zero_points=False)
         for a in items:
             if a['sample_token'] != token: raise ValueError('Prediction sample_token mismatch')
             name = a['detection_name']
+            if car_includes_truck and name == 'truck':
+                name = 'car'
+                remapped_pred['truck_to_car'] += 1
             if name not in classes:
                 ignored_pred[name] += 1; continue
             numeric = a['translation'] + a['size'] + a['rotation'] + [a['detection_score']]
@@ -84,6 +89,8 @@ def evaluate(root, version, prediction_path, classes, include_zero_points=False)
             'per_class': per_class, 'custom_mAP': float(np.mean([p['AP'] for p in per_class.values()])),
             'excluded': dict(removed), 'ignored_prediction_classes': dict(ignored_pred),
             'include_zero_points': include_zero_points,
+            'car_includes_truck': car_includes_truck,
+            'remapped_prediction_classes': dict(remapped_pred),
             'limitations': ['Partner num_lidar_pts copied, not recomputed.',
                            'Car and Rider mappings are dataset-specific.',
                            'No NDS, velocity, attribute, or global trajectory metrics.']}
@@ -99,6 +106,8 @@ def main():
     p.add_argument('--baseline-version', help='Version for baseline if different from --version')
     p.add_argument('--classes', default='car,motorcycle,pedestrian')
     p.add_argument('--include-zero-points', action='store_true', help='Sensitivity check using GT boxes with copied zero point counts')
+    p.add_argument('--car-includes-truck', action='store_true',
+                   help='Evaluate car and truck predictions together as VF Car, without modifying source JSON')
     p.add_argument('--output', default='outputs/vf6_01_5hz/comparison.json')
     a = p.parse_args()
     classes = a.classes.split(',')
@@ -107,11 +116,11 @@ def main():
     b_root = a.baseline_data_root or a.data_root
     b_version = a.baseline_version or a.version
     if a.baseline:
-        report['baseline'] = evaluate(b_root, b_version, a.baseline, classes, a.include_zero_points)
+        report['baseline'] = evaluate(b_root, b_version, a.baseline, classes, a.include_zero_points, a.car_includes_truck)
         print('baseline custom_mAP:', report['baseline']['custom_mAP'])
         for cls, metrics in report['baseline']['per_class'].items(): print(' ', cls, metrics)
     if a.refined:
-        report['refined'] = evaluate(a.data_root, a.version, a.refined, classes, a.include_zero_points)
+        report['refined'] = evaluate(a.data_root, a.version, a.refined, classes, a.include_zero_points, a.car_includes_truck)
         print('refined custom_mAP:', report['refined']['custom_mAP'])
         for cls, metrics in report['refined']['per_class'].items(): print(' ', cls, metrics)
     if a.refined and a.baseline: report['delta_custom_mAP'] = report['refined']['custom_mAP'] - report['baseline']['custom_mAP']

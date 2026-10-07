@@ -69,7 +69,10 @@ def main():
     parser.add_argument('--output-dir', default='outputs/vf-adapted-sweeps2-01')
     parser.add_argument('--legacy-center-correction', action='store_true',
                         help='Explicitly use the audited bevfusion-det.pth MIT legacy center convention')
+    parser.add_argument('--car-includes-truck', action='store_true',
+                        help='Track/refine truck too and evaluate car+truck together as VF Car')
     a = parser.parse_args()
+    tracking_classes = 'car,truck,motorcycle,pedestrian' if a.car_includes_truck else 'car,motorcycle,pedestrian'
     os.chdir(ROOT)
     output = Path(a.output_dir).resolve()
     if output.exists() and any(output.iterdir()):
@@ -107,6 +110,7 @@ def main():
         'source': str(SOURCE), 'dataset': str(dataset), 'version': VERSION,
         'sweeps': a.sweeps, 'checkpoint': 'pretrained/bevfusion-det.pth',
         'size_policy': 'grm', 'center_convention': 'mit-legacy-center-as-bottom',
+        'tracking_classes': tracking_classes.split(','), 'car_includes_truck': a.car_includes_truck,
         'evaluation': 'custom VF AP/TP, three annotated classes; no NDS'}, indent=2))
     run('infos', [py, 'tools/data_converter/create_vf_infos.py', '--root-path', str(dataset),
                   '--version', VERSION, '--max-sweeps', str(a.sweeps), '--max-sweep-age', '1.0'])
@@ -128,7 +132,7 @@ def main():
     for branch, mode in BRANCHES.items():
         run(branch, [py, 'DetZero-main-2/integration/run_pipeline.py', '--results_path', str(baseline),
                      '--data_root', str(dataset), '--version', VERSION, '--coordinate-mode', 'global',
-                     '--device', 'cuda', '--tracking-device', 'cpu', '--classes', 'car,motorcycle,pedestrian',
+                     '--device', 'cuda', '--tracking-device', 'cpu', '--classes', tracking_classes,
                      '--min_score', '0.1', '--max-gap-seconds', '0.6', '--size_policy', 'grm',
                      '--z-policy', 'center', '--intensity-mode', 'unit', '--refinement', mode,
                      '--output_dir', str(output / branch)])
@@ -138,7 +142,8 @@ def main():
         metrics_path = output / branch / 'custom_metrics.json'
         run('eval_' + branch, [py, 'tools/evaluate_vf_comparison.py', '--data-root', str(dataset),
                               '--version', VERSION, '--baseline', str(prediction),
-                              '--classes', 'car,motorcycle,pedestrian', '--output', str(metrics_path)])
+                              '--classes', 'car,motorcycle,pedestrian', '--output', str(metrics_path),
+                              *(['--car-includes-truck'] if a.car_includes_truck else [])])
         metrics = read(metrics_path)['baseline']
         row = {'branch': branch, 'custom_mAP_percent': metrics['custom_mAP'] * 100}
         for cls, values in metrics['per_class'].items():
