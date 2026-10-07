@@ -26,6 +26,18 @@ OBJECT_PALETTE = {
 }
 
 
+def draw_track_label(canvas, text, x, y):
+    """Draw readable tracking text at the final video resolution."""
+    font, scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2
+    (width, height), baseline = cv2.getTextSize(text, font, scale, thickness)
+    x = max(4, min(int(x), canvas.shape[1] - width - 5))
+    y = max(height + 5, min(int(y), canvas.shape[0] - baseline - 5))
+    cv2.rectangle(canvas, (x - 3, y - height - 4),
+                  (x + width + 3, y + baseline + 3), (15, 15, 15), -1)
+    cv2.putText(canvas, text, (x, y), font, scale, (0, 0, 0), 4, cv2.LINE_AA)
+    cv2.putText(canvas, text, (x, y), font, scale, (0, 255, 255), thickness, cv2.LINE_AA)
+
+
 def make_track_labels(document):
     """Use distinct display IDs while retaining original tracker IDs in a sidecar."""
     ids = set()
@@ -65,6 +77,7 @@ def render_camera_view(img: np.ndarray, boxes: list, cam_cs: dict, cam_pose: dic
                        is_tracking: bool = False, track_labels=None) -> np.ndarray:
     canvas = img.copy()
     orig_h, orig_w = canvas.shape[:2]
+    tracking_tags = []
     intrinsic = np.array(cam_cs['camera_intrinsic'])
 
     l2e_t = np.array(lidar_cs['translation'])
@@ -122,6 +135,9 @@ def render_camera_view(img: np.ndarray, boxes: list, cam_cs: dict, cam_pose: dic
 
         if is_tracking and short_id:
             tag_text = f"#{short_id} {name[:3].capitalize()}"
+            tracking_tags.append((tag_text, tag_x * target_w / orig_w,
+                                  tag_y * target_h / orig_h))
+            continue
         else:
             tag_text = f"{name[:3].capitalize()} {score:.2f}"
 
@@ -130,6 +146,8 @@ def render_camera_view(img: np.ndarray, boxes: list, cam_cs: dict, cam_pose: dic
         cv2.putText(canvas, tag_text, (tag_x, tag_y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
 
     canvas = cv2.resize(canvas, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+    for text, x, y in tracking_tags:
+        draw_track_label(canvas, text, x, y)
     cv2.rectangle(canvas, (5, 5), (5 + len(cam_name) * 8 + 14, 22), (20, 20, 25), -1)
     cv2.putText(canvas, cam_name, (10, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
     return canvas
@@ -211,8 +229,7 @@ def render_lidar_bev(lidar_path: str, boxes: list, lidar_cs: dict, lidar_pose: d
         if is_tracking and item.get('tracking_id', ''):
             tid = item['tracking_id']
             short_id = track_labels.get(tid, tid) if track_labels is not None else tid
-            cv2.putText(bev, f"#{short_id}", (int(u.mean()) - 8, int(v.mean()) - 6),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
+            draw_track_label(bev, f"#{short_id}", int(u.mean()) - 8, int(v.mean()) - 6)
 
     cv2.rectangle(bev, (5, 5), (140, 22), (20, 20, 25), -1)
     cv2.putText(bev, "LiDAR BEV (50m)", (10, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 220, 255), 1, cv2.LINE_AA)
