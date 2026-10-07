@@ -3,6 +3,7 @@ import argparse
 import subprocess
 import sys
 import json
+import shutil
 import cv2
 import numpy as np
 from pathlib import Path
@@ -25,10 +26,43 @@ OBJECT_PALETTE = {
 }
 
 
+def make_track_labels(document):
+    """Use distinct display IDs while retaining original tracker IDs in a sidecar."""
+    ids = set()
+    for boxes in document['results'].values():
+        for box in boxes:
+            tid = box.get('tracking_id')
+            if not isinstance(tid, str) or not tid.strip():
+                raise ValueError('Tracking video requires a nonempty tracker ID on every box')
+            ids.add(tid)
+    return {tid: f'T{i + 1:03d}' for i, tid in enumerate(sorted(ids))}
+
+
+def select_scenes(nusc, documents):
+    """Require identical full-scene coverage across the before/after inputs."""
+    samples = {s['token']: s for s in nusc.sample}
+    tokens = set(documents[0]['results'])
+    if not tokens or not tokens <= set(samples):
+        raise ValueError('Prediction sample tokens are empty or do not belong to this dataset')
+    if any(set(d['results']) != tokens for d in documents[1:]):
+        raise ValueError('Before/after JSONs must contain the same sample tokens, including empty frames')
+    scene_tokens = {samples[t]['scene_token'] for t in tokens}
+    expected = {t for t, s in samples.items() if s['scene_token'] in scene_tokens}
+    if tokens != expected:
+        raise ValueError('Video inputs must cover all frames of each selected scene')
+    for document in documents:
+        if document.get('coordinate_mode') == 'ego_uncompensated_diagnostic':
+            raise ValueError('This renderer projects global boxes; ego diagnostics are not supported')
+        for token, boxes in document['results'].items():
+            if any(b.get('sample_token') != token for b in boxes):
+                raise ValueError('Box sample_token differs from its frame')
+    return [s for s in nusc.scene if s['token'] in scene_tokens]
+
+
 def render_camera_view(img: np.ndarray, boxes: list, cam_cs: dict, cam_pose: dict,
                        lidar_cs: dict, lidar_pose: dict,
                        target_w: int = 480, target_h: int = 270, cam_name: str = "",
-                       is_tracking: bool = False) -> np.ndarray:
+                       is_tracking: bool = False, track_labels=None) -> np.ndarray:
     canvas = img.copy()
     orig_h, orig_w = canvas.shape[:2]
     intrinsic = np.array(cam_cs['camera_intrinsic'])
@@ -72,7 +106,7 @@ def render_camera_view(img: np.ndarray, boxes: list, cam_cs: dict, cam_pose: dic
 
         color = OBJECT_PALETTE.get(name, (0, 255, 0))
         tid = item.get('tracking_id', '')
-        short_id = str(tid).split('_')[-1] if tid else ''
+        short_id = track_labels.get(tid, tid) if track_labels is not None else tid
 
         def pt(idx):
             return (int(round(corners_img[0, idx])), int(round(corners_img[1, idx])))
@@ -103,7 +137,8 @@ def render_camera_view(img: np.ndarray, boxes: list, cam_cs: dict, cam_pose: dic
 
 def render_lidar_bev(lidar_path: str, boxes: list, lidar_cs: dict, lidar_pose: dict,
                      size: int = 540, pc_range: float = 50.0,
-                     track_history: dict = None, is_tracking: bool = False) -> np.ndarray:
+                     track_history: dict = None, is_tracking: bool = False,
+                     track_labels=None) -> np.ndarray:
     bev = np.full((size, size, 3), 15, dtype=np.uint8)
     center_px = (size // 2, size // 2)
 
@@ -111,8 +146,14 @@ def render_lidar_bev(lidar_path: str, boxes: list, lidar_cs: dict, lidar_pose: d
         r_px = int(r / pc_range * (size // 2))
         cv2.circle(bev, center_px, r_px, (35, 38, 44), 1, cv2.LINE_AA)
 
+    if not os.path.isfile(lidar_path):
+        raise FileNotFoundError(lidar_path)
     if os.path.exists(lidar_path):
-        pts = np.fromfile(lidar_path, dtype=np.float32).reshape(-1, 5)[:, :3]
+        raw = np.fromfile(lidar_path, dtype=np.float32)
+        if raw.size % 5:
+            raise ValueError('LiDAR file must contain five float32 values per point')
+        pts = raw.reshape(-1, 5)[:, :3]
+        pts = pts[np.isfinite(pts).all(axis=1)]
         mask = (np.abs(pts[:, 0]) <= pc_range) & (np.abs(pts[:, 1]) <= pc_range)
         pts = pts[mask]
         u = np.clip(((pts[:, 0] + pc_range) / (2 * pc_range) * (size - 1)).astype(np.int32), 0, size - 1)
@@ -168,7 +209,8 @@ def render_lidar_bev(lidar_path: str, boxes: list, lidar_cs: dict, lidar_pose: d
         cv2.line(bev, center, front_mid, color, 2, cv2.LINE_AA)
 
         if is_tracking and item.get('tracking_id', ''):
-            short_id = str(item['tracking_id']).split('_')[-1]
+            tid = item['tracking_id']
+            short_id = track_labels.get(tid, tid) if track_labels is not None else tid
             cv2.putText(bev, f"#{short_id}", (int(u.mean()) - 8, int(v.mean()) - 6),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
 
@@ -179,14 +221,18 @@ def render_lidar_bev(lidar_path: str, boxes: list, lidar_cs: dict, lidar_pose: d
 
 def generate_video(model_title: str, results_json: str, output_name: str,
                    nusc, frames, is_tracking: bool = False, min_score: float = 0.25,
-                   output_dir="outputs/vf6_01_5hz/videos", fps=5.0):
+                   output_dir="outputs/vf6_01_5hz/videos", fps=5.0,
+                   track_labels=None):
     print("=" * 60)
     print(f"Generating Video: {model_title}")
     print(f"Source JSON: {results_json}")
     print(f"Output File: {output_name}")
     print("=" * 60)
 
-    data = json.load(open(results_json))['results']
+    document = json.loads(Path(results_json).read_text())
+    data = document['results']
+    if is_tracking and track_labels is None:
+        track_labels = make_track_labels(document)
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     raw_video = out_dir / f"{output_name}_raw.mp4"
@@ -204,7 +250,7 @@ def generate_video(model_title: str, results_json: str, output_name: str,
 
     for frm_idx, (_, token) in enumerate(frames):
         sample = nusc.get("sample", token)
-        all_boxes = data.get(token, [])
+        all_boxes = data[token]
         score_key = 'tracking_score' if is_tracking else 'detection_score'
         boxes = [b for b in all_boxes if b.get(score_key, 0.0) >= min_score]
 
@@ -238,7 +284,7 @@ def generate_video(model_title: str, results_json: str, output_name: str,
                     raw_img, boxes, cs_record, pose_record,
                     lidar_cs=lidar_cs, lidar_pose=lidar_pose,
                     target_w=target_cam_w, target_h=target_cam_h,
-                    cam_name=display_name, is_tracking=is_tracking
+                    cam_name=display_name, is_tracking=is_tracking, track_labels=track_labels
                 )
                 row_imgs.append(cam_canvas)
             cam_rows.append(np.hstack(row_imgs))
@@ -247,14 +293,14 @@ def generate_video(model_title: str, results_json: str, output_name: str,
         bev_canvas = render_lidar_bev(
             str(lidar_path), boxes, lidar_cs, lidar_pose,
             size=lidar_size, pc_range=50.0,
-            track_history=track_history, is_tracking=is_tracking
+            track_history=track_history, is_tracking=is_tracking, track_labels=track_labels
         )
 
         full_frame = np.hstack([cameras_canvas, bev_canvas])
 
         # Top banner with Title and Info
         banner = np.full((36, full_frame.shape[1], 3), 20, dtype=np.uint8)
-        cv2.putText(banner, f"VF | {fps:.2f} Hz | {model_title}", (15, 24),
+        cv2.putText(banner, f"{fps:.2f} Hz | {model_title}", (15, 24),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 220, 255), 2, cv2.LINE_AA)
         status_txt = f"Frame [{frm_idx + 1:03d}/{len(frames):03d}] | Active Objects: {len(boxes)}"
         cv2.putText(banner, status_txt, (full_frame.shape[1] - 380, 24),
@@ -291,18 +337,33 @@ def main():
     parser.add_argument('--output-dir', default='outputs/vf6_01_5hz/videos')
     parser.add_argument('--min-score', type=float, default=.25)
     args = parser.parse_args()
+    if not 0 <= args.min_score <= 1:
+        parser.error('--min-score must be in [0, 1]')
+    if shutil.which('ffmpeg') is None:
+        raise RuntimeError('ffmpeg is required to encode H.264 videos; check the container before rendering')
     nusc = NuScenes(version=args.version, dataroot=args.data_root, verbose=False)
     configs = [('BEVFusion', args.baseline, 'bevfusion', False),
                ('BEVFusion + DetZero', args.refined, 'refined', False),
-               ('Tracking diagnostic', args.tracking, 'tracking', True)]
-    for scene in nusc.scene:
+               ('BEVFusion + DetZero (track IDs)', args.tracking, 'tracking', True)]
+    documents = {suffix: json.loads(Path(file).read_text())
+                 for _, file, suffix, _ in configs if file}
+    scenes = select_scenes(nusc, list(documents.values()))
+    labels = make_track_labels(documents['tracking']) if args.tracking else None
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if labels is not None:
+        (output_dir / 'tracking_id_map.json').write_text(json.dumps(labels, indent=2))
+    for scene in scenes:
         samples = sorted((s for s in nusc.sample if s['scene_token'] == scene['token']), key=lambda s: s['timestamp'])
         frames = [(s['timestamp'], s['token']) for s in samples]
         fps = 1e6 / float(np.median(np.diff([f[0] for f in frames]))) if len(frames) > 1 else 5.
+        if not np.isfinite(fps) or fps <= 0:
+            raise ValueError('Scene timestamps must have positive frame intervals')
         for title, path, suffix, tracking in configs:
             if path:
                 generate_video(title, path, scene['name'] + '_' + suffix, nusc, frames,
-                               tracking, args.min_score, args.output_dir, fps)
+                               tracking, args.min_score, args.output_dir, fps,
+                               labels if tracking else None)
 
 
 if __name__ == '__main__':
