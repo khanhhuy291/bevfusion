@@ -54,8 +54,11 @@ class VideoRendererTests(unittest.TestCase):
                                                 track_labels=labels)
             self.assertEqual(image.shape, (270, 480, 3))
             strings = [call.args[1] for call in draw.call_args_list]
-            self.assertTrue(any('#T001' in x for x in strings))
-            self.assertTrue(any('#T002' in x for x in strings))
+            self.assertIn('T001', strings)
+            self.assertIn('T002', strings)
+            camera_colors = {call.args[1]: call.args[5] for call in draw.call_args_list
+                             if call.args[1] in labels.values()}
+            self.assertNotEqual(camera_colors['T001'], camera_colors['T002'])
         with tempfile.TemporaryDirectory() as d:
             lidar = Path(d) / 'cloud.bin'
             np.zeros((2, 5), dtype=np.float32).tofile(lidar)
@@ -63,8 +66,11 @@ class VideoRendererTests(unittest.TestCase):
                 renderer.render_lidar_bev(str(lidar), boxes, pose, pose,
                                           is_tracking=True, track_labels=labels)
                 strings = [call.args[1] for call in draw.call_args_list]
-                self.assertIn('#T001', strings)
-                self.assertIn('#T002', strings)
+                self.assertIn('T001', strings)
+                self.assertIn('T002', strings)
+                bev_colors = {call.args[1]: call.args[5] for call in draw.call_args_list
+                              if call.args[1] in labels.values()}
+                self.assertEqual(camera_colors, bev_colors)
             with self.assertRaises(FileNotFoundError):
                 renderer.render_lidar_bev(str(Path(d) / 'missing.bin'), [], pose, pose)
 

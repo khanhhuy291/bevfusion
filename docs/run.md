@@ -49,7 +49,7 @@ Nếu có đường dẫn FFmpeg, chạy:
   --output-dir outputs/vf-car-truck-sweeps2-01/videos
 ```
 
-Video sau có box đã tracking + refining và ID màu vàng. Truck có thể xuất hiện nếu track được giữ lại.
+Video sau có box đã tracking + refining; chỉ hiện ID bằng chữ màu, không có nền. Mỗi ID có màu riêng và giữ cùng màu trên camera/BEV qua các frame. Truck có thể xuất hiện nếu track được giữ lại.
 
 **3. Kết quả trên máy công ty**
 

@@ -4,6 +4,7 @@ import subprocess
 import sys
 import json
 import shutil
+import colorsys
 import cv2
 import numpy as np
 from pathlib import Path
@@ -26,16 +27,13 @@ OBJECT_PALETTE = {
 }
 
 
-def draw_track_label(canvas, text, x, y):
-    """Draw readable tracking text at the final video resolution."""
+def draw_track_label(canvas, text, x, y, color):
+    """Draw only the colored ID at the final video resolution, without a background."""
     font, scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2
     (width, height), baseline = cv2.getTextSize(text, font, scale, thickness)
     x = max(4, min(int(x), canvas.shape[1] - width - 5))
     y = max(height + 5, min(int(y), canvas.shape[0] - baseline - 5))
-    cv2.rectangle(canvas, (x - 3, y - height - 4),
-                  (x + width + 3, y + baseline + 3), (15, 15, 15), -1)
-    cv2.putText(canvas, text, (x, y), font, scale, (0, 0, 0), 4, cv2.LINE_AA)
-    cv2.putText(canvas, text, (x, y), font, scale, (0, 255, 255), thickness, cv2.LINE_AA)
+    cv2.putText(canvas, text, (x, y), font, scale, color, thickness, cv2.LINE_AA)
 
 
 def make_track_labels(document):
@@ -48,6 +46,24 @@ def make_track_labels(document):
                 raise ValueError('Tracking video requires a nonempty tracker ID on every box')
             ids.add(tid)
     return {tid: f'T{i + 1:03d}' for i, tid in enumerate(sorted(ids))}
+
+
+def make_track_colors(labels):
+    """Assign distinct bright BGR colors, stable across frames and camera/BEV views."""
+    colors, used = {}, set()
+    for i, display_id in enumerate(sorted(set(labels.values()))):
+        hue = (i * 0.618033988749895) % 1.0
+        saturation = 0.65 + 0.1 * (i % 3)
+        value = 0.9 + 0.05 * ((i // 3) % 3)
+        while True:
+            rgb = colorsys.hsv_to_rgb(hue, saturation, value)
+            color = tuple(round(channel * 255) for channel in reversed(rgb))
+            if color not in used:
+                break
+            hue = (hue + 0.001) % 1.0
+        colors[display_id] = color
+        used.add(color)
+    return colors
 
 
 def select_scenes(nusc, documents):
@@ -78,6 +94,9 @@ def render_camera_view(img: np.ndarray, boxes: list, cam_cs: dict, cam_pose: dic
     canvas = img.copy()
     orig_h, orig_w = canvas.shape[:2]
     tracking_tags = []
+    track_colors = make_track_colors(track_labels or {
+        b['tracking_id']: b['tracking_id'] for b in boxes if b.get('tracking_id')
+    }) if is_tracking else {}
     intrinsic = np.array(cam_cs['camera_intrinsic'])
 
     l2e_t = np.array(lidar_cs['translation'])
@@ -134,9 +153,9 @@ def render_camera_view(img: np.ndarray, boxes: list, cam_cs: dict, cam_pose: dic
         tag_y = int(np.clip(corners_img[1, min_y_idx] - 6, 22, orig_h - 10))
 
         if is_tracking and short_id:
-            tag_text = f"#{short_id} {name[:3].capitalize()}"
+            tag_text = short_id
             tracking_tags.append((tag_text, tag_x * target_w / orig_w,
-                                  tag_y * target_h / orig_h))
+                                  tag_y * target_h / orig_h, track_colors[short_id]))
             continue
         else:
             tag_text = f"{name[:3].capitalize()} {score:.2f}"
@@ -146,8 +165,8 @@ def render_camera_view(img: np.ndarray, boxes: list, cam_cs: dict, cam_pose: dic
         cv2.putText(canvas, tag_text, (tag_x, tag_y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
 
     canvas = cv2.resize(canvas, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-    for text, x, y in tracking_tags:
-        draw_track_label(canvas, text, x, y)
+    for text, x, y, color in tracking_tags:
+        draw_track_label(canvas, text, x, y, color)
     cv2.rectangle(canvas, (5, 5), (5 + len(cam_name) * 8 + 14, 22), (20, 20, 25), -1)
     cv2.putText(canvas, cam_name, (10, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
     return canvas
@@ -159,6 +178,9 @@ def render_lidar_bev(lidar_path: str, boxes: list, lidar_cs: dict, lidar_pose: d
                      track_labels=None) -> np.ndarray:
     bev = np.full((size, size, 3), 15, dtype=np.uint8)
     center_px = (size // 2, size // 2)
+    track_colors = make_track_colors(track_labels or {
+        b['tracking_id']: b['tracking_id'] for b in boxes if b.get('tracking_id')
+    }) if is_tracking else {}
 
     for r in [15, 30, 45]:
         r_px = int(r / pc_range * (size // 2))
@@ -229,7 +251,8 @@ def render_lidar_bev(lidar_path: str, boxes: list, lidar_cs: dict, lidar_pose: d
         if is_tracking and item.get('tracking_id', ''):
             tid = item['tracking_id']
             short_id = track_labels.get(tid, tid) if track_labels is not None else tid
-            draw_track_label(bev, f"#{short_id}", int(u.mean()) - 8, int(v.mean()) - 6)
+            draw_track_label(bev, short_id, int(u.mean()) - 8, int(v.mean()) - 6,
+                             track_colors[short_id])
 
     cv2.rectangle(bev, (5, 5), (140, 22), (20, 20, 25), -1)
     cv2.putText(bev, "LiDAR BEV (50m)", (10, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 220, 255), 1, cv2.LINE_AA)
@@ -370,6 +393,8 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     if labels is not None:
         (output_dir / 'tracking_id_map.json').write_text(json.dumps(labels, indent=2))
+        (output_dir / 'tracking_id_colors.json').write_text(json.dumps(
+            {'color_format': 'BGR', 'colors': make_track_colors(labels)}, indent=2))
     for scene in scenes:
         samples = sorted((s for s in nusc.sample if s['scene_token'] == scene['token']), key=lambda s: s['timestamp'])
         frames = [(s['timestamp'], s['token']) for s in samples]

@@ -93,3 +93,82 @@ not apply the virtual-camera adapter.
 Compare with `outputs/vf-car-truck-sweeps2-01/comparison.csv` from the adapted run.
 Keep checkpoint, sweeps, classes, score thresholds and evaluation policy fixed.
 Do not reuse adapted predictions with this source calibration for rendering.
+
+
+**Dataset mới đủ điều kiện chạy về cấu trúc và định dạng.** Tôi đã kiểm tra:
+
+- **156 frame, 1 scene, 15.475 box GT**, đủ 6 camera và LiDAR.
+- Đọc toàn bộ ảnh/LiDAR: không thiếu file, không phát hiện dữ liệu không hợp lệ.
+- Tạo và kiểm tra infos 2 sweep thành công.
+- GT, timestamp và ego pose giống bản adapted.
+
+**Khác biệt chính:** bản này dùng ảnh **1920×1536 đã undistort**, chưa warp thành camera ảo 1600×900 như bản adapted. Camera keyframe lệch timestamp tới khoảng **75 ms**; calibration và đồng bộ chưa được xác nhận hoàn toàn. Tôi chưa chạy inference GPU tại máy này.
+
+Bạn có thể xem [ảnh kiểm tra LiDAR + GT trên camera](/Users/khanhhuy/bevfusion/outputs/vf_original_audit/projection_frame50/all_cameras_lidar_overlay.png).
+
+**1. Đồng bộ sang máy công ty**
+
+Đặt dataset tại:
+
+```text
+/home/khanhhuy/bevfusion/data/nuscenes_vf6_01/
+```
+
+Cập nhật các file sau trong project máy công ty:
+
+- [run_vf_adapted_ablation.py](/Users/khanhhuy/bevfusion/tools/run_vf_adapted_ablation.py)
+- [validate_nuscenes_data.py](/Users/khanhhuy/bevfusion/tools/validate_nuscenes_data.py)
+- [evaluate_vf_comparison.py](/Users/khanhhuy/bevfusion/tools/evaluate_vf_comparison.py)
+- [render_vf_videos.py](/Users/khanhhuy/bevfusion/tools/render_vf_videos.py)
+
+**2. Chạy toàn bộ trong container GPU đang dùng**
+
+```bash
+(
+set -e
+cd /workspace/bevfusion
+
+/opt/venv/bin/python tools/run_vf_adapted_ablation.py \
+  --data-root data/nuscenes_vf6_01 \
+  --sweeps 2 \
+  --legacy-center-correction \
+  --car-includes-truck \
+  --output-dir outputs/vf-original-car-truck-sweeps2-01
+
+command -v ffmpeg
+
+/opt/venv/bin/python tools/render_vf_videos.py \
+  --data-root outputs/vf-original-car-truck-sweeps2-01/dataset_local \
+  --version v1.0-mini \
+  --baseline outputs/vf-original-car-truck-sweeps2-01/baseline/results_nusc_center_corrected.json \
+  --tracking outputs/vf-original-car-truck-sweeps2-01/grm_prm/results_nusc_detzero_tracking.json \
+  --min-score 0.1 \
+  --output-dir outputs/vf-original-car-truck-sweeps2-01/videos
+)
+```
+
+Lệnh chạy **detection → tracking → GRM → PRM → đánh giá bốn nhánh → hai video trước/sau**. Thư mục output phải mới hoặc rỗng.
+
+Nếu thiếu FFmpeg, kết quả model và đánh giá vẫn đã lưu; bổ sung FFmpeg rồi chạy lại riêng lệnh render.
+
+Script giữ ảnh, LiDAR và calibration của dataset mới. Nó vẫn đưa tọa độ UTM về gốc local để tránh mất độ chính xác, và áp dụng resize/crop đầu vào của BEVFusion.
+
+**3. Kết quả trên máy công ty**
+
+```text
+/home/khanhhuy/bevfusion/outputs/vf-original-car-truck-sweeps2-01/
+```
+
+Trong đó:
+
+| Kết quả | Đường dẫn tương đối |
+|---|---|
+| So sánh bốn nhánh | `comparison.csv` |
+| Metric từng nhánh | `<nhánh>/custom_metrics.json` |
+| Log đánh giá | `logs/eval_*.log` |
+| Hai video | `videos/` |
+| Tham số thí nghiệm | `experiment.json` |
+
+So sánh với lần adapted **`vf-car-truck-sweeps2-01`** vì cùng dùng 2 sweep và quy tắc **Car = car + truck**.
+
+Tôi cũng lưu hướng dẫn đầy đủ tại [RUN_VF_ORIGINAL_END_TO_END.md](/Users/khanhhuy/bevfusion/docs/RUN_VF_ORIGINAL_END_TO_END.md).
