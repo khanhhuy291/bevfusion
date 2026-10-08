@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / 'DetZero-main-2'))
 sys.path.insert(0, str(ROOT))
 from integration import bridge as b
 from integration import run_pipeline as r
+from integration.gap_fill import export_gap_filled
 from tools.evaluate_vf_comparison import evaluate
 
 CFG = str(r.DETZERO_ROOT / 'tracking/tools/cfgs/tk_model_cfgs/nuscenes_detzero_track.yaml')
@@ -112,6 +113,35 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(output['results']['t'][0]['detection_score'], .8)
         self.assertEqual(output['results']['t'][1], prepared['original']['results']['t'][1])
         self.assertEqual(prepared['original']['results']['t'][0]['translation'][0], 10)
+
+    def test_real_tracker_missing_observation_can_be_exported(self):
+        frames, original = {}, {'meta': {}, 'results': {}}
+        for i in range(7):
+            token = f't{i}'
+            detections = [record(token=token, x=10+i*.1)] if i in [1, 2, 4, 5] else []
+            original['results'][token] = detections
+            frames[str(i)] = dict(
+                boxes_global=np.asarray([b.nusc_box(a) for a in detections], dtype=np.float32).reshape(-1, 7),
+                name=np.asarray(['Vehicle']*len(detections), dtype=str),
+                nusc_name=np.asarray(['car']*len(detections), dtype=str),
+                score=np.asarray([.8]*len(detections)), source_index=np.arange(len(detections)),
+                sample_token=token, pose=np.eye(4), ego_translation=np.zeros(3), timestamp=i*.2)
+        prepared = dict(frames={'s': frames}, classes=['car'], original=original)
+        tracks = r.run_tracking(prepared, CFG, 'cpu')
+        self.assertEqual(len(tracks), 1)
+        tid, t = next(iter(tracks.items()))
+        missing = list(t['sample_idx']).index('3')
+        self.assertEqual(t['source_index'][missing], -1)
+        refined = {tid: t['boxes_global'][:, :7].copy()}
+        detection, _ = b.export_detection(prepared, tracks, refined)
+        with tempfile.TemporaryDirectory() as tmp:
+            tracking = r.export_tracking_results(prepared, tracks, refined, Path(tmp)/'tracking.json')
+        filled, filled_tracking, report = export_gap_filled(prepared, tracks, refined, detection, tracking)
+        self.assertEqual(report['counts']['added_boxes'], 1)
+        self.assertEqual(len(filled['results']['t3']), 1)
+        self.assertEqual(filled_tracking['results']['t3'][0]['tracking_id'], tid)
+        self.assertEqual(filled['results']['t0'], [])
+        self.assertEqual(filled['results']['t6'], [])
 
     def test_tracking_filters_construction_and_ego_velocity(self):
         t=track(n=1);t['nusc_name']='construction_vehicle'

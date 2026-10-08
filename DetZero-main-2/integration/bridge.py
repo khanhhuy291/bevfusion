@@ -109,6 +109,7 @@ def prepare(results_path, data_root, version, classes, min_score):
                 'sequence_name': scene, 'scene_name': scenes[scene]['name'],
                 'frame_id': i, 'sample_token': token,
                 'timestamp': sample['timestamp'] / 1e6, 'pose': transform,
+                'ego_translation': np.asarray(egos[sd['ego_pose_token']]['translation'], dtype=np.float64),
                 'lidar_path': sd['filename'],
                 'boxes_global': np.asarray(boxes, dtype=np.float32).reshape(-1, 7),
                 'name': np.asarray([CLASS_MAP[n] for n in names], dtype=str),

@@ -20,6 +20,7 @@ DETZERO_ROOT = Path(__file__).resolve().parent.parent
 for directory in [DETZERO_ROOT, DETZERO_ROOT / 'tracking', DETZERO_ROOT / 'refining', DETZERO_ROOT / 'utils']:
     sys.path.insert(0, str(directory))
 from integration import bridge
+from integration.gap_fill import export_gap_filled
 from detzero_utils.config_utils import cfg_from_yaml_file
 from detzero_track.models.detzero_tracker import DetZeroTracker
 from detzero_refine.models import build_network
@@ -56,6 +57,15 @@ def parse_args():
                    help='unit divides 0..255 by 255; transfer choice, not calibrated to Waymo')
     p.add_argument('--max-gap-seconds', type=float, default=0.6)
     p.add_argument('--allow-refine-errors', action='store_true', help='Record explicit per-track fallbacks instead of stopping on model errors')
+    p.add_argument('--fill-missed-detections', action='store_true',
+                   help='Also write separate detection/tracking JSONs with bounded internal gaps filled')
+    p.add_argument('--gap-fill-method', choices=['tracker', 'interpolate'], default='tracker')
+    p.add_argument('--gap-fill-max-seconds', type=float, default=0.6,
+                   help='Maximum TOTAL elapsed time between the two observed anchors')
+    p.add_argument('--gap-fill-score-decay', type=float, default=0.8)
+    p.add_argument('--gap-fill-min-score', type=float, default=0.1)
+    p.add_argument('--gap-fill-iou', type=float, default=0.1)
+    p.add_argument('--gap-fill-center-distance', type=float, default=0.5)
     return p.parse_args()
 
 
@@ -226,6 +236,8 @@ def main():
     args = parse_args()
     if args.skip_refining: args.refinement = 'none'
     if not 0 <= args.min_score <= 1: raise ValueError('min_score must be in [0, 1]')
+    if args.fill_missed_detections and args.coordinate_mode != 'global':
+        raise ValueError('Gap export requires a consistent global frame')
     classes = list(dict.fromkeys(c.strip() for c in args.classes.split(',') if c.strip()))
     if not classes or set(classes) - set(bridge.CLASS_MAP): raise ValueError('Unsupported/empty classes')
     prepared = bridge.prepare(args.results_path, args.data_root, args.version, classes, args.min_score)
@@ -246,7 +258,18 @@ def main():
     if args.coordinate_mode == 'ego': detection['coordinate_mode'] = 'ego_uncompensated_diagnostic'
     (output_dir / 'results_nusc_detzero_refined.json').write_text(json.dumps(detection, allow_nan=False))
     tracking_name = 'tracks_ego_diagnostic.json' if args.coordinate_mode == 'ego' else 'results_nusc_detzero_tracking.json'
-    export_tracking_results(prepared, tracks, refined, output_dir / tracking_name, args.coordinate_mode)
+    tracking = export_tracking_results(prepared, tracks, refined, output_dir / tracking_name, args.coordinate_mode)
+    gap_report = None
+    if args.fill_missed_detections:
+        gap_detection, gap_tracking, gap_report = export_gap_filled(
+            prepared, tracks, refined, detection, tracking, method=args.gap_fill_method,
+            max_gap_seconds=args.gap_fill_max_seconds, score_decay=args.gap_fill_score_decay,
+            min_score=args.gap_fill_min_score, iou_threshold=args.gap_fill_iou,
+            center_distance=args.gap_fill_center_distance)
+        (output_dir / 'results_nusc_detzero_gap_filled.json').write_text(json.dumps(gap_detection, allow_nan=False))
+        (output_dir / 'results_nusc_detzero_tracking_gap_filled.json').write_text(json.dumps(gap_tracking, allow_nan=False))
+        (output_dir / 'gap_fill_report.json').write_text(json.dumps(gap_report, indent=2, allow_nan=False))
+        print(f'[Gap fill] {gap_report["counts"]}', flush=True)
     (output_dir / 'tracks.pkl').write_bytes(pickle.dumps({k: {n: v for n, v in t.items() if n != 'pts'} for k, t in tracks.items()}, protocol=4))
     (output_dir / 'refined_boxes.pkl').write_bytes(pickle.dumps(refined, protocol=4))
     git = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=DETZERO_ROOT, capture_output=True, text=True)
@@ -261,6 +284,7 @@ def main():
               'matched_boxes_replaced': replaced, 'status_counts': dict(Counter(s['status'] for s in status.values())),
               'grm_counts': dict(Counter(s['grm'] for s in status.values())),
               'prm_counts': dict(Counter(s['prm'] for s in status.values())), 'track_status': status,
+              'gap_fill_counts': gap_report['counts'] if gap_report else None,
               'notes': ['Offline; untracked detections and detector scores are preserved.',
                         'No CRM. Ego diagnostics do not establish physical world trajectories.']}
     (output_dir / 'run_report.json').write_text(json.dumps(report, indent=2, allow_nan=False))
