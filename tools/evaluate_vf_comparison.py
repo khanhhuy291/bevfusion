@@ -1,7 +1,9 @@
 """Custom frame-level VF detection evaluation; NOT official nuScenes NDS/AMOTA.
 
 Uses nuScenes SDK center-distance AP/TP algorithms on explicitly selected tokens
-and annotated classes. Velocity/attributes are intentionally not scored.
+and annotated classes, plus custom upright IoU 3D AP. Velocity/attributes are
+intentionally not scored. IoU AP uses full-recall precision-envelope integration,
+not the nuScenes AP cutoff policy or the official Waymo matching algorithm.
 """
 import argparse
 from collections import Counter
@@ -13,6 +15,10 @@ from nuscenes.eval.common.data_classes import EvalBoxes
 from nuscenes.eval.common.utils import center_distance
 from nuscenes.eval.detection.algo import accumulate, calc_ap, calc_tp
 from nuscenes.eval.detection.data_classes import DetectionBox
+try:
+    from .vf_iou3d import evaluate_iou3d, validate_thresholds
+except ImportError:  # Direct invocation: python tools/evaluate_vf_comparison.py.
+    from vf_iou3d import evaluate_iou3d, validate_thresholds
 
 CLASS_MAP = {'vehicle.car': 'car', 'vehicle.motorcycle': 'motorcycle',
              'human.pedestrian.adult': 'pedestrian'}
@@ -20,7 +26,8 @@ RANGES = {'car': 50, 'motorcycle': 40, 'pedestrian': 40}
 
 
 def evaluate(root, version, prediction_path, classes, include_zero_points=False,
-             car_includes_truck=False):
+             car_includes_truck=False, iou_thresholds=(.25, .5, .7)):
+    iou_thresholds = validate_thresholds(iou_thresholds)
     root = Path(root)
     def table(name):
         return {x['token']: x for x in json.loads((root / version / f'{name}.json').read_text())}
@@ -87,6 +94,7 @@ def evaluate(root, version, prediction_path, classes, include_zero_points=False,
             'prediction_sha256': hashlib.sha256(Path(prediction_path).read_bytes()).hexdigest(),
             'sample_tokens_sha256': hashlib.sha256('\n'.join(sorted(samples)).encode()).hexdigest(),
             'per_class': per_class, 'custom_mAP': float(np.mean([p['AP'] for p in per_class.values()])),
+            'iou3d': evaluate_iou3d(gt, pred, classes, iou_thresholds),
             'excluded': dict(removed), 'ignored_prediction_classes': dict(ignored_pred),
             'include_zero_points': include_zero_points,
             'car_includes_truck': car_includes_truck,
@@ -105,25 +113,39 @@ def main():
     p.add_argument('--baseline-data-root', help='Data root for baseline if different from --data-root')
     p.add_argument('--baseline-version', help='Version for baseline if different from --version')
     p.add_argument('--classes', default='car,motorcycle,pedestrian')
+    p.add_argument('--iou-thresholds', type=float, nargs='+', default=[.25, .5, .7],
+                   help='Custom IoU 3D AP thresholds; default: 0.25 0.5 0.7')
     p.add_argument('--include-zero-points', action='store_true', help='Sensitivity check using GT boxes with copied zero point counts')
     p.add_argument('--car-includes-truck', action='store_true',
                    help='Evaluate car and truck predictions together as VF Car, without modifying source JSON')
     p.add_argument('--output', default='outputs/vf6_01_5hz/comparison.json')
     a = p.parse_args()
+    try:
+        thresholds = validate_thresholds(a.iou_thresholds)
+    except ValueError as exc:
+        p.error(str(exc))
     classes = a.classes.split(',')
     if not classes or set(classes) - set(RANGES) or len(set(classes)) != len(classes): raise ValueError('Unsupported or duplicate classes')
     report = {}
     b_root = a.baseline_data_root or a.data_root
     b_version = a.baseline_version or a.version
     if a.baseline:
-        report['baseline'] = evaluate(b_root, b_version, a.baseline, classes, a.include_zero_points, a.car_includes_truck)
+        report['baseline'] = evaluate(b_root, b_version, a.baseline, classes, a.include_zero_points, a.car_includes_truck, thresholds)
         print('baseline custom_mAP:', report['baseline']['custom_mAP'])
+        print('baseline IoU 3D mAP:', report['baseline']['iou3d']['mAP_by_threshold'])
         for cls, metrics in report['baseline']['per_class'].items(): print(' ', cls, metrics)
     if a.refined:
-        report['refined'] = evaluate(a.data_root, a.version, a.refined, classes, a.include_zero_points, a.car_includes_truck)
+        report['refined'] = evaluate(a.data_root, a.version, a.refined, classes, a.include_zero_points, a.car_includes_truck, thresholds)
         print('refined custom_mAP:', report['refined']['custom_mAP'])
+        print('refined IoU 3D mAP:', report['refined']['iou3d']['mAP_by_threshold'])
         for cls, metrics in report['refined']['per_class'].items(): print(' ', cls, metrics)
     if a.refined and a.baseline: report['delta_custom_mAP'] = report['refined']['custom_mAP'] - report['baseline']['custom_mAP']
+    if a.refined and a.baseline:
+        report['delta_iou3d_mAP_by_threshold'] = {
+            key: report['refined']['iou3d']['mAP_by_threshold'][key] - value
+            for key, value in report['baseline']['iou3d']['mAP_by_threshold'].items()
+        }
+        print('delta IoU 3D mAP:', report['delta_iou3d_mAP_by_threshold'])
     out = Path(a.output); out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2, allow_nan=False))
     print('Saved:', out)

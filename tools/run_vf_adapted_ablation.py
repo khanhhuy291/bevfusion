@@ -154,6 +154,13 @@ def main():
                               *(['--car-includes-truck'] if a.car_includes_truck else [])])
         metrics = read(metrics_path)['baseline']
         row = {'branch': branch, 'custom_mAP_percent': metrics['custom_mAP'] * 100}
+        for threshold, value in metrics['iou3d']['mAP_by_threshold'].items():
+            row[f'IoU3D_mAP_at_{threshold}_percent'] = value * 100
+            row[f'delta_IoU3D_mAP_at_{threshold}_pp'] = value * 100 - (
+                rows[0][f'IoU3D_mAP_at_{threshold}_percent'] if rows else value * 100)
+        for cls, values in metrics['iou3d']['per_class'].items():
+            for threshold, result in values['by_threshold'].items():
+                row[f'{cls}_IoU3D_AP_at_{threshold}_percent'] = result['AP'] * 100
         for cls, values in metrics['per_class'].items():
             row.update({cls + '_AP_percent': values['AP'] * 100,
                         **{cls + '_' + k: values[k] for k in ['trans_err', 'scale_err', 'orient_err']}})
@@ -161,9 +168,10 @@ def main():
         rows.append(row)
     with (output / 'comparison.csv').open('w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0])); writer.writeheader(); writer.writerows(rows)
-    print('\nBranch        custom mAP (%)    delta (pp)')
+    print('\nBranch        custom mAP (%)    delta (pp)    IoU3D mAP@0.5 (%)    delta (pp)')
     for row in rows:
-        print(f"{row['branch']:<13} {row['custom_mAP_percent']:>12.4f} {row['delta_custom_mAP_pp']:>12.4f}")
+        print(f"{row['branch']:<13} {row['custom_mAP_percent']:>12.4f} {row['delta_custom_mAP_pp']:>12.4f}"
+              f" {row['IoU3D_mAP_at_0.5_percent']:>20.4f} {row['delta_IoU3D_mAP_at_0.5_pp']:>12.4f}")
     print(f'\nALL FOUR BRANCHES COMPLETED\nResults: {output}\nCSV: {output / "comparison.csv"}')
 
 

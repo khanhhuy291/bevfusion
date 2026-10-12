@@ -42,7 +42,18 @@ class VFCarMappingTests(unittest.TestCase):
             self.assertGreater(merged['custom_mAP'], 0.99)
             self.assertEqual(merged['remapped_prediction_classes'], {'truck_to_car': 1})
             self.assertEqual(merged['per_class']['car']['scale_err'], 0)
+            self.assertEqual(plain['iou3d']['mAP_by_threshold']['0.5'], 0)
+            self.assertEqual(merged['iou3d']['mAP_by_threshold']['0.5'], 1)
             self.assertEqual(prediction.read_text(), original)
+            # Same XY center and score: bad dimensions leave distance AP intact,
+            # but fixing them changes IoU AP. This is the GRM evaluation use case.
+            oversized = json.loads(original)
+            oversized['results']['frame'][0]['size'] = [4, 8, 4]
+            oversized_path = root / 'oversized.json'
+            oversized_path.write_text(json.dumps(oversized))
+            before = evaluate(root, 'v1.0-mini', oversized_path, ['car'], car_includes_truck=True)
+            self.assertEqual(before['custom_mAP'], merged['custom_mAP'])
+            self.assertEqual(before['iou3d']['mAP_by_threshold']['0.5'], 0)
 
 
 if __name__ == '__main__':
