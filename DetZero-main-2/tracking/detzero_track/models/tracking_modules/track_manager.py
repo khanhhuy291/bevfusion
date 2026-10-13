@@ -266,8 +266,12 @@ class TrackManager():
         for match_idx, match in enumerate(matched):
             trk_idx, det_idx = match
             if trk_idx >= len(tracks): continue
+            # A single-stage match is an observed measurement in either direction.
+            # two_stage=True keeps the predicted box, which must not overwrite
+            # its source detection in the single-stage VF integration.
             tracks[trk_idx].update(det_boxes[det_idx], det_name[det_idx], det_data['score'][det_idx],
-                                      det_data['num_points'][det_idx] if not da_stage else 0, two_stage=True)
+                                      det_data['num_points'][det_idx] if not da_stage else 0,
+                                      two_stage=not da_stage)
             source_indices[tracks[trk_idx].track_id] = int(det_data.get('source_index', np.arange(len(det_name)))[det_idx])
 
         if self.modules_dicts['track_merge_config']['enable']:

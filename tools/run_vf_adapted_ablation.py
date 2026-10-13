@@ -73,6 +73,8 @@ def main():
                         help='Explicitly use the audited bevfusion-det.pth MIT legacy center convention')
     parser.add_argument('--car-includes-truck', action='store_true',
                         help='Track/refine truck too and evaluate car+truck together as VF Car')
+    parser.add_argument('--preserve-bottom-classes', default='motorcycle',
+                        help='VF default anchors motorcycle to detector bottom; pass an empty string for the old center policy')
     a = parser.parse_args()
     tracking_classes = 'car,truck,motorcycle,pedestrian' if a.car_includes_truck else 'car,motorcycle,pedestrian'
     os.chdir(ROOT)
@@ -115,6 +117,7 @@ def main():
         'source': str(source), 'dataset': str(dataset), 'version': VERSION,
         'sweeps': a.sweeps, 'checkpoint': 'pretrained/bevfusion-det.pth',
         'size_policy': 'grm', 'center_convention': 'mit-legacy-center-as-bottom',
+        'z_policy': 'center', 'preserve_bottom_classes': a.preserve_bottom_classes.split(',') if a.preserve_bottom_classes else [],
         'tracking_classes': tracking_classes.split(','), 'car_includes_truck': a.car_includes_truck,
         'evaluation': 'custom VF AP/TP, three annotated classes; no NDS'}, indent=2))
     run('infos', [py, 'tools/data_converter/create_vf_infos.py', '--root-path', str(dataset),
@@ -142,7 +145,8 @@ def main():
                      '--data_root', str(dataset), '--version', VERSION, '--coordinate-mode', 'global',
                      '--device', 'cuda', '--tracking-device', 'cpu', '--classes', tracking_classes,
                      '--min_score', '0.1', '--max-gap-seconds', '0.6', '--size_policy', 'grm',
-                     '--z-policy', 'center', '--intensity-mode', 'unit', '--refinement', mode,
+                     '--z-policy', 'center', '--preserve-bottom-classes', a.preserve_bottom_classes,
+                     '--intensity-mode', 'unit', '--refinement', mode,
                      '--output_dir', str(output / branch)])
     rows = []
     for branch in ['baseline', *BRANCHES]:

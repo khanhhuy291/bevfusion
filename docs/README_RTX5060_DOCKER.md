@@ -455,6 +455,11 @@ rg --files outputs | rg '(results_nusc.*\.json|run_report\.json|experiment\.json
 
 Chi tiết metric và định dạng kết quả: [VF_IOU3D_EVALUATION.md](VF_IOU3D_EVALUATION.md).
 
+Nếu box xe máy bị nâng đáy sau GRM/PRM, xem [VF_BOX_Z_FIX.md](VF_BOX_Z_FIX.md)
+để chạy bản sửa reverse tracking và giữ đáy riêng motorcycle. Runner VF và
+threshold sweep hiện mặc định giữ đáy motorcycle; các kết quả sweep cũ dùng
+`z_policy=center` thuần nên cần phân biệt policy khi so sánh.
+
 ## Nguồn tham khảo
 
 - [Docker Engine trên Ubuntu](https://docs.docker.com/engine/install/ubuntu/)

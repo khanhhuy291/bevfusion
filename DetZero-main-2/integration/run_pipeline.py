@@ -53,6 +53,8 @@ def parse_args():
     p.add_argument('--size_policy', choices=['auto', 'detector_prior', 'grm'], default='auto',
                    help='auto accepts GRM within 25%% of detector median, for every selected class')
     p.add_argument('--z-policy', choices=['center', 'preserve_bottom'], default='center')
+    p.add_argument('--preserve-bottom-classes', default='',
+                   help='Comma-separated nuScenes classes overriding z-policy with detector-bottom anchoring; e.g. motorcycle. Does not estimate the road.')
     p.add_argument('--intensity-mode', choices=['unit', 'raw', 'tanh'], default='unit',
                    help='unit divides 0..255 by 255; transfer choice, not calibrated to Waymo')
     p.add_argument('--max-gap-seconds', type=float, default=0.6)
@@ -161,7 +163,8 @@ def position_chunks(track, model, device, rng):
     return output
 
 
-def run_refining(tracks, models, device, size_policy='auto', refinement='full', z_policy='center', allow_errors=False):
+def run_refining(tracks, models, device, size_policy='auto', refinement='full', z_policy='center', allow_errors=False,
+                 preserve_bottom_classes=()):
     refined, status = {}, {}
     for tid, track in tracks.items():
         original = track['boxes_global'][:, :7]
@@ -193,8 +196,10 @@ def run_refining(tracks, models, device, size_policy='auto', refinement='full', 
                 if refinement == 'full':
                     position = position_chunks(track, models['prm'][cls], device, rng)
                     info['prm'] = 'applied'
+                track_z_policy = ('preserve_bottom' if track['nusc_name'] in preserve_bottom_classes else z_policy)
                 refined[tid] = bridge.combine_boxes(np.r_[np.zeros(3), size, 0], position,
-                                                     original_boxes=original, z_policy=z_policy)
+                                                     original_boxes=original, z_policy=track_z_policy)
+                info['z_policy'] = track_z_policy
             info['status'] = 'processed'
         except Exception as exc:
             if not allow_errors: raise RuntimeError(f'Refinement failed for {tid}') from exc
@@ -240,6 +245,9 @@ def main():
         raise ValueError('Gap export requires a consistent global frame')
     classes = list(dict.fromkeys(c.strip() for c in args.classes.split(',') if c.strip()))
     if not classes or set(classes) - set(bridge.CLASS_MAP): raise ValueError('Unsupported/empty classes')
+    preserve_bottom_classes = {c.strip() for c in args.preserve_bottom_classes.split(',') if c.strip()}
+    if preserve_bottom_classes - set(classes):
+        raise ValueError('preserve-bottom-classes must be a subset of selected classes')
     prepared = bridge.prepare(args.results_path, args.data_root, args.version, classes, args.min_score)
     check_coordinates(prepared, args.coordinate_mode, args.refinement, args.assume_stationary)
     tracks = run_tracking(prepared, args.tracking_cfg, args.tracking_device or args.device, args.max_gap_seconds)
@@ -250,7 +258,7 @@ def main():
     models = load_refining_models(args.checkpoint_dir, args.device, needed, stages)
     if args.refinement != 'none': collect_track_pointclouds(prepared, tracks, args.data_root, args.intensity_mode)
     refined, status = run_refining(tracks, models, args.device, args.size_policy, args.refinement,
-                                   args.z_policy, args.allow_refine_errors)
+                                   args.z_policy, args.allow_refine_errors, preserve_bottom_classes)
     output_dir = Path(args.output_dir); output_dir.mkdir(parents=True, exist_ok=True)
     if models['checkpoints']:
         prepared['original']['meta']['use_external'] = True

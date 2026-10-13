@@ -8,6 +8,7 @@ vf_sweep_python="${VF_SWEEP_PYTHON:-/opt/venv/bin/python}"
 vf_sweep_run="${1:-outputs/vf-car-truck-sweeps2-01}"
 vf_sweep_dataset="$vf_sweep_run/dataset_local"
 vf_sweep_baseline="$vf_sweep_run/baseline/results_nusc_center_corrected.json"
+vf_sweep_bottom_classes="${VF_SWEEP_BOTTOM_CLASSES-motorcycle}"
 
 for vf_sweep_file in \
   "$vf_sweep_baseline" \
@@ -48,6 +49,7 @@ do
     --max-gap-seconds 0.6 \
     --size_policy grm \
     --z-policy center \
+    --preserve-bottom-classes "$vf_sweep_bottom_classes" \
     --intensity-mode unit \
     --refinement full \
     --output_dir "$vf_sweep_case" \

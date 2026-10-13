@@ -17,6 +17,7 @@ from integration import bridge as b
 from integration import run_pipeline as r
 from integration.gap_fill import export_gap_filled
 from tools.evaluate_vf_comparison import evaluate
+from tools.apply_vf_bottom_anchor import anchor_saved
 
 CFG = str(r.DETZERO_ROOT / 'tracking/tools/cfgs/tk_model_cfgs/nuscenes_detzero_track.yaml')
 
@@ -84,6 +85,65 @@ class IntegrationTests(unittest.TestCase):
         geo = np.array([0,0,0,4,2,2,0])
         np.testing.assert_allclose(b.combine_boxes(geo, pos, original)[:, 2], 4)
         np.testing.assert_allclose(b.combine_boxes(geo, pos, original, 'preserve_bottom')[:, 2], 1)
+
+    def test_bottom_anchor_is_class_specific_and_keeps_prm_xy(self):
+        class ShiftPosition:
+            def __call__(self, batch):
+                boxes = batch['pos_trajectory'].cpu().numpy().copy()
+                boxes[..., 0] += .2
+                boxes[..., 2] += .3
+                return {'pred_boxes': boxes}, {}, {}
+        tracks = {'car': track(), 'moto': track('Cyclist')}
+        models = {'grm': {c: GeometryModel() for c in ['Vehicle', 'Cyclist']},
+                  'prm': {c: ShiftPosition() for c in ['Vehicle', 'Cyclist']}}
+        old, _ = r.run_refining(tracks, models, 'cpu', size_policy='grm')
+        anchored, status = r.run_refining(tracks, models, 'cpu', size_policy='grm',
+                                         preserve_bottom_classes={'motorcycle'})
+        np.testing.assert_allclose(anchored['car'], old['car'])
+        np.testing.assert_allclose(anchored['moto'][:, :2], old['moto'][:, :2])
+        np.testing.assert_allclose(anchored['moto'][:, 2] - anchored['moto'][:, 5]/2,
+                                   tracks['moto']['boxes_global'][:, 2] - tracks['moto']['boxes_global'][:, 5]/2)
+        self.assertEqual(status['moto']['z_policy'], 'preserve_bottom')
+        self.assertGreater(float(old['moto'][0, 2]), float(anchored['moto'][0, 2]))
+
+    def test_reverse_single_stage_uses_observed_box(self):
+        from easydict import EasyDict
+        from detzero_track.models.tracking_modules.track_manager import TrackManager
+        cfg = EasyDict(r.yaml.safe_load(Path(CFG).read_text())['MODEL']['TRACKING'])
+        cfg.DEVICE = 'cpu'
+        cfg.DATA_ASSOCIATION.DEVICE = 'cpu'
+        cfg.TRACK_MERGE.ENABLE = False
+        manager = TrackManager(cfg)
+        predicted = np.array([10., 0., 1., 4., 2., 2., 0.], dtype=np.float32)
+        measured = np.array([10.5, 0., 1.3, 4., 2., 1.5, .1], dtype=np.float32)
+        active = manager.modules_dicts['filter_module'](bbox=predicted, name='Cyclist',
+                    score=.8, frame_id='1', track_id=0)
+        detection = {'boxes_global': measured[None], 'name': np.array(['Cyclist']),
+                     'score': np.array([.7]), 'source_index': np.array([7])}
+        empty_forward = {'start': np.empty(0), 'boxes_global': np.empty((0,9)),
+                         'name': np.array([], dtype=str), 'score': np.empty(0),
+                         'obj_ids': np.empty(0), 'num_points': np.empty(0)}
+        output, _ = manager.reverse_tracking_module('0', detection, empty_forward, [active])
+        np.testing.assert_allclose(output[0]['boxes_global'][:7], measured)
+        self.assertEqual(output[0]['source_index'], 7)
+        self.assertEqual(output[0]['hit'], 1)
+
+    def test_saved_bottom_anchor_preserves_other_classes_and_inputs(self):
+        baseline = {'results': {'t': [record('motorcycle'), record('car')]}}
+        refined = copy.deepcopy(baseline)
+        refined['results']['t'][0]['translation'] = [11., .2, 1.3]
+        refined['results']['t'][0]['size'][2] = 1.5
+        unchanged = copy.deepcopy(refined)
+        output, n = anchor_saved(baseline, refined, {'motorcycle'})
+        self.assertEqual(n, 1)
+        box = output['results']['t'][0]
+        self.assertAlmostEqual(box['translation'][2] - box['size'][2]/2, 0.)
+        self.assertEqual(box['translation'][:2], [11., .2])
+        self.assertEqual(output['results']['t'][1], refined['results']['t'][1])
+        self.assertEqual(refined, unchanged)
+        invalid = copy.deepcopy(refined)
+        invalid['results']['t'][0]['detection_score'] = .1
+        with self.assertRaises(ValueError): anchor_saved(baseline, invalid, {'motorcycle'})
 
     def test_class_preserving_tracker_and_empty_frames(self):
         frames = {}
