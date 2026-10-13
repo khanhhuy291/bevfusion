@@ -1,5 +1,7 @@
 # VF original camera: four branches and before/after videos
 
+For a new dataset, use [RUN_VF_NEW_DATA_END_TO_END.md](RUN_VF_NEW_DATA_END_TO_END.md): it creates a fresh output directory and includes the reverse-tracking and motorcycle-bottom fixes. This document records the original-source example.
+
 Source: `data/nuscenes_vf6_01`, version `v1.0-mini`.
 This source already contains undistorted images; it has not received the
 virtual-camera homography used in `nuscenes_vf6_01_adapted`.
@@ -27,7 +29,9 @@ Update these files in the company project:
 
 - `tools/run_vf_adapted_ablation.py`
 - `tools/validate_nuscenes_data.py`
-- `tools/evaluate_vf_comparison.py`
+- `tools/evaluate_vf_comparison.py` and `tools/vf_iou3d.py`
+- `DetZero-main-2/integration/run_pipeline.py`
+- `DetZero-main-2/tracking/detzero_track/models/tracking_modules/track_manager.py`
 - `tools/render_vf_videos.py`
 
 The existing converter, configs and pretrained BEVFusion/DetZero checkpoints
@@ -48,6 +52,7 @@ cd /workspace/bevfusion
   --sweeps 2 \
   --legacy-center-correction \
   --car-includes-truck \
+  --preserve-bottom-classes motorcycle \
   --output-dir outputs/vf-original-car-truck-sweeps2-01
 
 command -v ffmpeg
@@ -133,6 +138,7 @@ cd /workspace/bevfusion
   --sweeps 2 \
   --legacy-center-correction \
   --car-includes-truck \
+  --preserve-bottom-classes motorcycle \
   --output-dir outputs/vf-original-car-truck-sweeps2-01
 
 command -v ffmpeg
@@ -172,3 +178,4 @@ Trong đó:
 So sánh với lần adapted **`vf-car-truck-sweeps2-01`** vì cùng dùng 2 sweep và quy tắc **Car = car + truck**.
 
 Tôi cũng lưu hướng dẫn đầy đủ tại [RUN_VF_ORIGINAL_END_TO_END.md](/Users/khanhhuy/bevfusion/docs/RUN_VF_ORIGINAL_END_TO_END.md).
+Current commands use the corrected reverse tracker and motorcycle-bottom anchoring. Older adapted runs used the original center policy; rerun both sources with the same current code/policies before attributing differences solely to camera adaptation.

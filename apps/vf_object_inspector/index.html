@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="vi">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="dark"><title>VF · Object Inspector</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<header class="app-header">
+ <div class="brand"><svg viewBox="0 0 36 36" aria-hidden="true"><path d="M18 3 32 11v15l-14 8-14-8V11Z M4 11l14 8 14-8 M18 19v15"/></svg><div><span class="eyebrow">VF / DETECTION REVIEW</span><h1>Object Inspector</h1></div></div>
+ <div class="header-right"><span class="local-badge"><i></i> LOCAL · READ ONLY</span><button id="export" class="button primary" disabled>Xuất ảnh PNG</button></div>
+</header>
+<main>
+ <section class="toolbar panel" aria-label="Điều khiển frame">
+  <div class="frame-controls"><span class="field-label">FRAME</span><button id="previous" class="square" aria-label="Frame trước">‹</button><input id="frameNumber" type="number" min="0" value="30" aria-label="Chỉ số frame"><span id="frameTotal" class="muted">/ —</span><button id="next" class="square" aria-label="Frame tiếp theo">›</button><button id="play" class="square" aria-label="Phát các frame">▶</button></div>
+  <input id="frameSlider" type="range" min="0" max="155" value="30" aria-label="Chọn frame">
+  <label class="field"><span class="field-label">CAMERA</span><select id="camera"><option value="AUTO">Tự chọn theo object</option></select></label>
+  <label class="field examples"><span class="field-label">VÍ DỤ</span><select id="example"><option value="">Chọn object minh họa</option></select></label>
+ </section>
+ <section class="filterbar" aria-label="Bộ lọc và chú giải">
+  <div class="legend"><label class="legend-item gt"><input type="checkbox" id="showGT" checked><span class="line solid"></span>Ground truth</label><label class="legend-item baseline"><input type="checkbox" id="showBaseline" checked><span class="line dashed"></span>BEVFusion</label><label class="legend-item detzero"><input type="checkbox" id="showDetzero" checked><span class="line solid"></span>BEVFusion + DetZero</label></div>
+  <div class="filters"><label>Class <select id="classFilter"><option value="all">Car + motorcycle + pedestrian</option><option value="car">Car + truck</option><option value="motorcycle">Motorcycle</option><option value="pedestrian">Pedestrian</option></select></label><label>Score ≥ <input id="score" type="number" min="0" max="1" step="0.05" value="0.1" aria-label="Ngưỡng score hiển thị"></label><label>IoU <select id="iou"><option value="0.25">0.25</option><option value="0.5" selected>0.50</option><option value="0.7">0.70</option></select></label><label class="extra"><input id="other" type="checkbox">Hiện cả box ngoài protocol</label></div>
+ </section>
+ <div id="message" role="status" aria-live="polite" class="message">Đang đọc dữ liệu…</div>
+ <section class="workspace">
+  <article class="panel camera-panel"><div class="panel-header"><div><span class="eyebrow">01 / CAMERA</span><h2 id="cameraTitle">Chồng ba bộ box</h2></div><div class="segmented"><button id="sceneMode" aria-pressed="false">Toàn cảnh</button><button id="objectMode" aria-pressed="true" class="active">Object</button></div></div>
+   <div class="canvas-wrap camera-wrap"><canvas id="cameraCanvas" tabindex="0" aria-label="Ảnh camera với box GT, BEVFusion và DetZero; bấm box để chọn object"></canvas><span id="cameraLoading" class="canvas-hint">Đang tải ảnh camera…</span><span id="selectedBadge" class="selected-badge">Chọn object bên dưới</span></div>
+   <div class="panel-footer"><span>Bấm box để chọn · kéo để di chuyển · cuộn để zoom</span><button id="cameraReset" class="text-button">Đặt lại góc nhìn</button></div>
+  </article>
+  <div class="spatial-stack">
+   <article class="panel"><div class="panel-header small"><div><span class="eyebrow">02 / BIRD'S-EYE VIEW</span><h2>BEV</h2></div><button id="bevReset" class="text-button">Reset</button></div><div class="canvas-wrap spatial-wrap"><canvas id="bevCanvas" tabindex="0" aria-label="Góc BEV của LiDAR và box; bấm box để chọn object"></canvas><span class="corner-note">+X tiến / +Y trái · grid theo mét</span></div></article>
+   <article class="panel"><div class="panel-header small"><div><span class="eyebrow">03 / POINT CLOUD</span><h2>3D</h2></div><div class="inline"><label class="point-toggle"><input type="checkbox" id="showPoints" checked>LiDAR</label><button id="threeReset" class="text-button">Reset</button></div></div><div class="canvas-wrap spatial-wrap"><canvas id="threeCanvas" tabindex="0" aria-label="Góc nhìn 3D; kéo để xoay, cuộn để zoom"></canvas><span class="corner-note">Kéo để xoay · cuộn để zoom · phím mũi tên để xoay</span></div></article>
+  </div>
+ </section>
+ <section class="inspection-grid">
+  <article class="panel object-panel"><div class="panel-header"><div><span class="eyebrow">OBJECTS IN FRAME</span><h2 id="objectCount">— objects</h2></div><input id="search" type="search" placeholder="Tìm class, GT ID hoặc source #" aria-label="Tìm object"></div>
+   <div class="list-controls"><select id="objectFilter" aria-label="Lọc object"><option value="all">Tất cả object</option><option value="gain">IoU tăng</option><option value="loss">IoU giảm</option><option value="unpaired">Chưa ghép GT / prediction</option></select><label><input id="follow" type="checkbox" checked>Theo GT object qua frame</label><span id="tpCount" class="muted"></span></div>
+   <div class="table-scroll"><table class="objects-table"><thead><tr><th>Object</th><th>Source</th><th>BEVFusion IoU</th><th>DetZero IoU</th><th>Δ IoU</th></tr></thead><tbody id="objects"></tbody></table></div>
+   <p class="panel-note">Ghép chẩn đoán: baseline ↔ GT cùng class, XY ≤ 0.5 m; DetZero dùng cùng source box. Đây không phải quyết định TP/FP.</p>
+  </article>
+  <article class="panel detail-panel"><div class="panel-header"><div><span class="eyebrow">SELECTED OBJECT</span><h2 id="detailTitle">Chưa chọn object</h2></div><span id="objectId" class="id-badge">—</span></div>
+   <div id="detailBody" class="detail-body"><p class="muted">Chọn một hàng hoặc bấm box trên ảnh/BEV.</p></div>
+  </article>
+ </section>
+ <footer class="app-footer"><span id="runInfo">Đang đọc run…</span><span>Score chỉ lọc hiển thị · IoU 3D là giao thể tích / hợp thể tích · Z không phải mặt đường đã fit</span></footer>
+</main>
+<script type="module" src="/app.js"></script>
+</body></html>

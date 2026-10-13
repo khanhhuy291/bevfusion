@@ -1,5 +1,9 @@
 # VF box height / Z correction
 
+**Khi nhận data mới và cần chạy cả BEVFusion:** dùng
+[RUN_VF_NEW_DATA_END_TO_END.md](RUN_VF_NEW_DATA_END_TO_END.md).
+Lệnh bên dưới dành cho chạy lại DetZero trên baseline đã lưu.
+
 ## Nguyên nhân đã xác định
 
 Trong run `vf-car-truck-sweeps2-01`, GRM giảm chiều cao motorcycle trung vị khoảng 0.488 m. Với `z_policy=center`, tâm GRM-only giữ Z của tracking, còn PRM full chỉ đổi Z trung vị khoảng -0.002 m so với baseline. Do `bottom = center_z - height/2`, đáy cuối cùng tăng trung vị khoảng 0.241 m trên 1.563 cặp gần GT. Vì vậy box nhìn như bị nhấc lên ngay cả khi tâm gần như không tăng. PRM cũng có thể thay đổi tâm Z trực tiếp ở từng box.

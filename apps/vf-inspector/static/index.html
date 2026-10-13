@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="vi">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>VF Object Inspector</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<svg class="symbols" aria-hidden="true"><defs>
+<symbol id="i-box" viewBox="0 0 24 24"><path d="m12 3 9 5v9l-9 5-9-5V8l9-5Zm0 0v9m9-4-9 4-9-4m9 4v10"/></symbol>
+<symbol id="i-left" viewBox="0 0 24 24"><path d="m14 6-6 6 6 6"/></symbol>
+<symbol id="i-right" viewBox="0 0 24 24"><path d="m10 6 6 6-6 6"/></symbol>
+<symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z"/></symbol>
+<symbol id="i-expand" viewBox="0 0 24 24"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/></symbol>
+<symbol id="i-reset" viewBox="0 0 24 24"><path d="M3 11a9 9 0 1 1 2 7M3 5v6h6"/></symbol>
+<symbol id="i-camera" viewBox="0 0 24 24"><path d="M3 7h4l2-3h6l2 3h4v13H3V7Z"/><circle cx="12" cy="13" r="4"/></symbol>
+<symbol id="i-save" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></symbol>
+</defs></svg>
+<header class="topbar">
+ <div class="brand"><span class="brand-mark"><svg><use href="#i-box"/></svg></span><div><h1>VF Object Inspector</h1><p>Ground truth · BEVFusion · BEVFusion + DetZero</p></div></div>
+ <div class="top-status"><span class="status-dot"></span><span id="datasetStatus">Đang đọc dataset…</span><button id="infoButton" class="button subtle">Thông tin run</button></div>
+</header>
+<main>
+ <section class="framebar panel" aria-label="Điều khiển frame">
+  <div class="frame-buttons"><button id="prev" class="icon-button" aria-label="Frame trước"><svg><use href="#i-left"/></svg></button><button id="play" class="icon-button" aria-label="Phát hoặc dừng"><svg><use href="#i-play"/></svg></button><button id="next" class="icon-button" aria-label="Frame sau"><svg><use href="#i-right"/></svg></button></div>
+  <div class="frame-track"><div class="track-head"><label for="frameRange">FRAME <b id="frameLabel">000</b><span id="frameTotal"> / —</span></label><span id="timeLabel">—</span></div><input id="frameRange" type="range" min="0" max="155" value="0" aria-label="Chọn frame"></div>
+  <label class="number-frame">Đến frame<input id="frameNumber" type="number" min="0" value="0" aria-label="Nhập số frame"></label>
+  <div class="frame-stats"><span><i class="dot gt"></i>GT <b id="gtCount">—</b></span><span><i class="dot bev"></i>BF <b id="bevCount">—</b></span><span><i class="dot detzero"></i>DZ <b id="dzCount">—</b></span></div>
+ </section>
+ <section class="filters" aria-label="Bộ lọc hiển thị">
+  <div class="layer-controls"><label class="layer gt"><input id="layerGt" type="checkbox" checked><span class="line solid"></span>Ground truth</label><label class="layer bev"><input id="layerBev" type="checkbox" checked><span class="line dashed"></span>BEVFusion</label><label class="layer detzero"><input id="layerDz" type="checkbox" checked><span class="line solid"></span>BEVFusion + DetZero</label></div>
+  <div class="filter-options"><label for="score">Score ≥ <b id="scoreLabel">0.10</b><input id="score" type="range" min="0" max="0.9" step="0.05" value="0.1"></label><label class="check"><input id="focusOnly" type="checkbox">Chỉ object đang chọn</label><label class="check"><input id="showPoints" type="checkbox" checked>LiDAR</label></div>
+ </section>
+ <div id="errorBanner" class="error hidden" role="alert"></div>
+ <div class="workspace">
+  <section class="views">
+   <article class="panel view-panel" id="cameraPanel">
+    <div class="view-header"><div><span class="eyebrow">CAMERA OVERLAY</span><h2 id="cameraTitle">Camera trước</h2></div><div class="view-actions"><label class="check compact"><input id="autoCamera" type="checkbox" checked>Tự chọn camera</label><button class="icon-button" data-reset="camera" aria-label="Reset camera"><svg><use href="#i-reset"/></svg></button><button class="icon-button" data-save="camera" aria-label="Lưu ảnh camera"><svg><use href="#i-save"/></svg></button><button class="icon-button" data-expand="cameraPanel" aria-label="Phóng to camera"><svg><use href="#i-expand"/></svg></button></div></div>
+    <div class="canvas-wrap camera-wrap"><canvas id="cameraCanvas" aria-label="Ảnh camera với box GT, BEVFusion và DetZero. Chọn object bằng danh sách hoặc click box." tabindex="0"></canvas><div class="canvas-badge" id="selectedBadge">Chọn một object để so sánh</div><div class="busy hidden" id="loading">Đang tải frame…</div></div>
+    <div id="cameraStrip" class="camera-strip" aria-label="Chọn camera"></div>
+    <div class="view-footer"><span>Click box để chọn · Cuộn để zoom · Kéo để pan</span><span id="cameraResolution">—</span></div>
+   </article>
+   <div class="spatial-grid">
+    <article class="panel view-panel" id="bevPanel"><div class="view-header"><div><span class="eyebrow">BIRD’S-EYE VIEW</span><h2>BEV · cùng hệ tọa độ ego</h2></div><div class="view-actions"><button class="icon-button" data-reset="bev" aria-label="Reset BEV"><svg><use href="#i-reset"/></svg></button><button class="icon-button" data-save="bev" aria-label="Lưu BEV"><svg><use href="#i-save"/></svg></button><button class="icon-button" data-expand="bevPanel" aria-label="Phóng to BEV"><svg><use href="#i-expand"/></svg></button></div></div><div class="canvas-wrap spatial-wrap"><canvas id="bevCanvas" aria-label="Góc BEV với LiDAR và footprint box" tabindex="0"></canvas><div class="axis-badge">↑ X tiến · ← Y trái</div></div><div class="view-footer"><span>Click footprint · Cuộn zoom · Kéo pan</span><span id="bevScale">—</span></div></article>
+    <article class="panel view-panel" id="threePanel"><div class="view-header"><div><span class="eyebrow">3D POINT CLOUD</span><h2>3D · kiểm tra chiều cao</h2></div><div class="view-actions"><button class="icon-button" data-reset="three" aria-label="Reset 3D"><svg><use href="#i-reset"/></svg></button><button class="icon-button" data-save="three" aria-label="Lưu góc 3D"><svg><use href="#i-save"/></svg></button><button class="icon-button" data-expand="threePanel" aria-label="Phóng to 3D"><svg><use href="#i-expand"/></svg></button></div></div><div class="canvas-wrap spatial-wrap"><canvas id="threeCanvas" aria-label="Góc nhìn 3D tương tác với LiDAR và box thực" tabindex="0"></canvas><div class="axis-badge">Lưới Z = 0 của ego</div></div><div class="view-footer"><span>Kéo để xoay · Shift + kéo để pan · Cuộn zoom</span><span id="pointCount">—</span></div></article>
+   </div>
+   <div class="bottom-note">Box và LiDAR được giữ nguyên từ dữ liệu. Lưới ego Z = 0 không phải mặt đường đã fit. Hình chiếu dùng pose riêng của từng camera.</div>
+  </section>
+  <aside class="sidebar">
+   <section class="panel object-browser"><div class="sidebar-heading"><div><span class="eyebrow">OBJECTS IN FRAME</span><h2>Chọn object để kiểm tra</h2></div><span id="listCount" class="badge">—</span></div>
+    <div class="class-chips" role="group" aria-label="Lọc class"><button class="chip active" data-class="all">Tất cả</button><button class="chip" data-class="car">Car + truck</button><button class="chip" data-class="motorcycle">Xe máy</button><button class="chip" data-class="pedestrian">Người</button></div>
+    <div class="search-row"><input id="search" type="search" placeholder="Tìm ID hoặc class…" aria-label="Tìm object"><select id="objectMode" aria-label="Loại object"><option value="gt">GT objects</option><option value="prediction">Không ghép GT</option><option value="all">Tất cả</option></select></div>
+    <div class="list-head"><span>Object / source index</span><span>IoU 3D: BF → DZ</span></div><div id="objectList" class="object-list" aria-label="Danh sách object"></div>
+   </section>
+   <section class="panel detail-panel"><div class="sidebar-heading"><div><span class="eyebrow">OBJECT COMPARISON</span><h2 id="objectTitle">Chưa chọn object</h2></div><button id="focusObject" class="button subtle">Tập trung</button></div>
+    <div id="objectMeta" class="object-meta">Chọn một object từ danh sách hoặc trên ảnh.</div>
+    <div class="iou-cards"><div class="iou-card bev"><span>BEVFusion · IoU 3D</span><b id="baseIou">—</b></div><div class="iou-card detzero"><span>+ DetZero · IoU 3D</span><b id="dzIou">—</b></div></div><div id="iouDelta" class="delta">—</div>
+    <div class="table-wrap"><table><caption>Kích thước và tâm ego (m)</caption><thead><tr><th>Đại lượng</th><th class="gt-text">GT</th><th class="bev-text">BF</th><th class="dz-text">DZ</th></tr></thead><tbody id="geometryTable"></tbody></table></div>
+    <div class="pairing-settings"><label for="matchRadius">Ghép gần theo XY<select id="matchRadius"><option value="0.5">≤ 0.5 m</option><option value="1" selected>≤ 1.0 m</option><option value="2">≤ 2.0 m</option></select></label><label class="check"><input id="zeroPoints" type="checkbox">Hiện GT 0 điểm LiDAR</label></div>
+    <p class="explain">Ghép cùng class theo khoảng cách baseline, một–một; giữ cùng source index cho DetZero. Đây là đối chiếu hình học, không phải kết luận TP/FP của evaluator.</p>
+   </section>
+   <div class="sidebar-note">Score là ngưỡng <b>hiển thị</b>; không chạy lại detection/refining. Chỉ hiện ba nhóm class đang được đánh giá.</div>
+  </aside>
+ </div>
+</main>
+<dialog id="infoDialog"><div class="dialog-head"><h2>Nguồn dữ liệu</h2><button id="closeInfo" class="button">Đóng</button></div><div id="runInfo"></div></dialog>
+<script src="/app.js" defer></script>
+</body></html>

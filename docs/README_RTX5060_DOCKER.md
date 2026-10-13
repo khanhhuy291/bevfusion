@@ -460,6 +460,17 @@ Nếu box xe máy bị nâng đáy sau GRM/PRM, xem [VF_BOX_Z_FIX.md](VF_BOX_Z_F
 threshold sweep hiện mặc định giữ đáy motorcycle; các kết quả sweep cũ dùng
 `z_policy=center` thuần nên cần phân biệt policy khi so sánh.
 
+## 9. Chạy end-to-end khi nhận dataset VF mới
+
+Dùng [RUN_VF_NEW_DATA_END_TO_END.md](RUN_VF_NEW_DATA_END_TO_END.md).
+Hướng dẫn có block lệnh chạy từ data mới qua BEVFusion → tracking → GRM/PRM
+→ đánh giá AP IoU 3D 0.25/0.5/0.7. Chỉ thay biến `vf_e2e_data`; output được tạo
+mới mỗi lần. Bản hiện tại giữ threshold 0.1 và giữ đáy riêng motorcycle.
+
+Runner áp dụng cho data VF đã chuyển sang nuScenes `v1.0-mini`, một scene,
+có calibration/pose thật và GT cho ba nhóm đánh giá. Các bước chuẩn bị raw
+data hoặc dataset nhiều scene/version khác chưa được tự động hóa trong lệnh này.
+
 ## Nguồn tham khảo
 
 - [Docker Engine trên Ubuntu](https://docs.docker.com/engine/install/ubuntu/)
