@@ -377,6 +377,84 @@ Mini validation có 81 sample; không so metric mini trực tiếp với full va
 File `results_nusc.json` là đầu vào cho bước DetZero trong
 [hướng dẫn tracking/refining](RUN_TRACKING_AND_REFINING.md).
 
+## 8. Đánh giá AP IoU 3D cho kết quả VF adapted đã có
+
+Đây là evaluator VF custom, không phải lệnh đánh giá mini validation chính
+thức ở mục 7. Chỉ đọc JSON detection trước/sau; không chạy lại detector,
+tracking, GRM/PRM và không cần checkpoint CRM hay CUDA extension.
+
+Trước hết đồng bộ **cả hai** file `tools/evaluate_vf_comparison.py` và
+`tools/vf_iou3d.py` mới sang `/home/khanhhuy/bevfusion` trên máy công ty.
+Bind mount làm chúng xuất hiện trong `/workspace/bevfusion` của container.
+Không dùng đường dẫn `/Users/khanhhuy/...` của Mac trong container Linux.
+
+Trên Terminal Ubuntu, nếu container đang chạy:
+
+```bash
+sudo docker exec -it bevfusion-detection /bin/bash
+```
+
+Nếu container đã dừng, dùng `sudo docker start -ai bevfusion-detection`.
+
+Trong container, kiểm tra bản evaluator và dependency:
+
+```bash
+cd /workspace/bevfusion
+/opt/venv/bin/python -c 'import numpy, shapely, pyquaternion, nuscenes; from tools.vf_iou3d import evaluate_iou3d; print("IoU 3D evaluator imports OK")'
+/opt/venv/bin/python tools/evaluate_vf_comparison.py --help
+```
+
+Help phải có `--iou-thresholds`. Nếu không có, file evaluator trên máy công
+ty chưa được cập nhật. Nếu `No module named tools.vf_iou3d` hoặc
+`No module named vf_iou3d`, kiểm tra helper đã được đồng bộ cùng evaluator.
+
+Lần adapted được ghi trong hướng dẫn end-to-end là
+`outputs/vf-car-truck-sweeps2-01`, dùng Car = car + truck. Lệnh dưới dành
+cho **đúng lần chạy đó**, không giả định đây là lần mới nhất trên máy công ty.
+Nếu output của bạn có tên khác, thay giá trị `vf_eval_run`. Runner đã tạo
+`dataset_local` với tọa độ được localize; phải dùng dataset này cùng JSON
+trong thư mục đó thay vì trộn với pose/GT nguồn.
+
+```bash
+(
+set -e
+set -o pipefail
+cd /workspace/bevfusion
+vf_eval_run=outputs/vf-car-truck-sweeps2-01
+for vf_eval_file in \
+  "$vf_eval_run/dataset_local/v1.0-mini/sample.json" \
+  "$vf_eval_run/baseline/results_nusc_center_corrected.json" \
+  "$vf_eval_run/grm_prm/results_nusc_detzero_refined.json"
+do
+  test -f "$vf_eval_file" || { echo "Missing file: $vf_eval_file"; exit 1; }
+done
+/opt/venv/bin/python tools/evaluate_vf_comparison.py \
+  --data-root "$vf_eval_run/dataset_local" \
+  --version v1.0-mini \
+  --baseline "$vf_eval_run/baseline/results_nusc_center_corrected.json" \
+  --refined "$vf_eval_run/grm_prm/results_nusc_detzero_refined.json" \
+  --classes car,motorcycle,pedestrian \
+  --car-includes-truck \
+  --iou-thresholds 0.25 0.5 0.7 \
+  --output "$vf_eval_run/comparison_iou3d.json" \
+  2>&1 | tee "$vf_eval_run/eval_iou3d.log"
+)
+```
+
+Không dùng `results_nusc_detzero_tracking.json` làm detection refined.
+Nếu lần chạy của bạn không dùng `--car-includes-truck`, bỏ cờ này khỏi
+lệnh đánh giá. Nếu không dùng runner/localization hoặc dùng checkpoint
+khác, lấy data root/version/baseline thực tế từ lệnh cũ và `run_report.json`;
+không tự áp correction legacy chỉ để khớp tên file ví dụ.
+
+Nếu không tìm thấy output, liệt kê các JSON có sẵn trong container:
+
+```bash
+rg --files outputs | rg '(results_nusc.*\.json|run_report\.json|experiment\.json)$'
+```
+
+Chi tiết metric và định dạng kết quả: [VF_IOU3D_EVALUATION.md](VF_IOU3D_EVALUATION.md).
+
 ## Nguồn tham khảo
 
 - [Docker Engine trên Ubuntu](https://docs.docker.com/engine/install/ubuntu/)

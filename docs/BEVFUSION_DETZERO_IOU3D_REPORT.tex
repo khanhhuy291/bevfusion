@@ -1,0 +1,277 @@
+% Compile with pdfLaTeX, the default compiler on Overleaf.
+% Standalone report: no external figures or data files are required.
+\documentclass[a4paper,11pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=2cm]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs,array}
+\usepackage{float}
+\usepackage[hidelinks]{hyperref}
+\usepackage{seqsplit}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt}
+\renewcommand{\arraystretch}{1.16}
+\newcommand{\baseline}{BEVFusion}
+\newcommand{\refined}{BEVFusion + DetZero}
+\title{Detection Quality Before and After DetZero\\
+\large 3D IoU AP at Thresholds 0.25, 0.50, and 0.70}
+\author{Experimental Report on the VF Adapted Dataset}
+\date{October 12, 2026}
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This report compares BEVFusion detections with the output of the DetZero
+pipeline on 156 frames from the VF adapted dataset. At a 3D IoU threshold
+of 0.50, mAP increases from 16.9240\% to 29.6554\%, an improvement of
+12.7314 percentage points. Car and motorcycle improve substantially,
+whereas pedestrian performance decreases at this threshold. These results
+show improvements in box geometry that center-distance AP alone does not
+fully capture. The discussed pipeline uses GRM/PRM without CRM and retains
+the detector confidence scores. The reported metrics follow a custom VF
+protocol rather than the official Waymo or nuScenes benchmark.
+\end{abstract}
+
+\section{Evaluation Scope and Dataset}
+Both outputs use the same 156 sample tokens, the same ground-truth (GT)
+counts per class, and the same evaluation filters. Evaluation ranges are
+50 m for car and 40 m for motorcycle and pedestrian. GT boxes with zero
+LiDAR points are excluded according to the dataset metadata; GT boxes
+outside the class-specific ranges are also excluded. Each evaluation
+records 903 zero-point GT exclusions and 6\,687 out-of-range GT exclusions.
+
+\begin{table}[H]
+\centering
+\caption{Evaluated GT and prediction counts after class and range filtering.}
+\label{tab:data}
+\begin{tabular}{lrrr}
+\toprule
+Class & GT & Before & After \\
+\midrule
+Car (incl. truck) & 4\,873 & 8\,808 & 8\,806 \\
+Motorcycle & 2\,492 & 2\,650 & 2\,650 \\
+Pedestrian & 520 & 7\,036 & 7\,036 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Car follows the \texttt{car\_includes\_truck=true} policy: truck predictions
+are grouped with car. Both outputs record 2\,842 remapped truck predictions.
+The VF Rider label is mapped to motorcycle by the dataset-specific class
+mapping. These results should not be transferred to a different class
+mapping without reevaluation.
+
+\section{Definition of 3D IoU and Average Precision}
+The evaluator assumes upright boxes rotated by yaw around the global Z
+axis, geometric box centers in global coordinates, and dimensions in
+width, length, height order. The intersection area of the two rotated BEV
+rectangles is multiplied by their vertical overlap to obtain the
+intersection volume:
+\begin{equation}
+\operatorname{IoU}_{3D}(B_p,B_g)
+=\frac{V(B_p\cap B_g)}{V(B_p)+V(B_g)-V(B_p\cap B_g)}.
+\end{equation}
+
+Predictions are sorted by descending confidence. Each prediction is
+matched to the unmatched GT box of the same class and frame with the
+highest IoU. A match is a true positive (TP) when
+$\operatorname{IoU}_{3D}\geq\tau$. An unmatched prediction is a false
+positive (FP), and an unmatched GT box is a false negative (FN).
+Each GT box can be matched only once. The evaluated thresholds are
+$\tau\in\{0.25,0.50,0.70\}$.
+
+AP is the area under the interpolated precision envelope over the full
+recall interval $[0,1]$. The IoU evaluator applies no confidence cutoff
+and does not use the nuScenes minimum recall/precision cutoff of 0.1.
+Consequently, TP/FP/FN counts include all candidates remaining after class
+and range filtering, rather than only predictions with confidence at
+least 0.1. IoU thresholds and confidence thresholds are distinct parameters.
+
+\section{Overall mAP at Each IoU Threshold}
+\begin{table}[H]
+\centering
+\caption{3D IoU mAP in percent. Differences are percentage points (pp).}
+\label{tab:map}
+\begin{tabular}{rrrr}
+\toprule
+IoU & \baseline & \refined & $\Delta$ (pp) \\
+\midrule
+0.25 & 55.5934 & 56.4768 & +0.8834 \\
+0.50 & 16.9240 & 29.6554 & +12.7314 \\
+0.70 & 0.7649 & 1.8283 & +1.0634 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At each IoU threshold, mAP is the unweighted average of AP across the
+three evaluated classes. Averaging further over the three selected IoU
+thresholds gives 24.4274\% before refinement and 29.3202\% afterward,
+a gain of 4.8928 pp. This aggregate depends on the selected thresholds
+and is a custom metric.
+
+\section{Per-Class AP Comparison}
+\begin{table}[H]
+\centering
+\small
+\caption{Per-class 3D IoU AP before and after DetZero. AP is reported in percent.}
+\label{tab:class-ap}
+\begin{tabular}{rlrrr}
+\toprule
+IoU & Class & Before & After & $\Delta$ (pp) \\
+\midrule
+0.25 & Car (incl. truck) & 89.3163 & 89.5836 & +0.2673 \\
+0.25 & Motorcycle & 71.0250 & 73.3337 & +2.3087 \\
+0.25 & Pedestrian & 6.4388 & 6.5132 & +0.0744 \\
+\midrule
+0.50 & Car (incl. truck) & 49.2058 & 61.7406 & +12.5347 \\
+0.50 & Motorcycle & 0.5390 & 27.1301 & +26.5910 \\
+0.50 & Pedestrian & 1.0271 & 0.0957 & -0.9315 \\
+\midrule
+0.70 & Car (incl. truck) & 2.2945 & 4.9270 & +2.6325 \\
+0.70 & Motorcycle & $1.6460\times10^{-5}$ & 0.5577 & +0.5577 \\
+0.70 & Pedestrian & 0.0003 & 0.0003 & 0.0000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Very small values are retained using scientific notation where needed to
+avoid rounding nonzero AP to zero. Baseline motorcycle AP at IoU 0.70
+is nonzero despite only one TP. Pedestrian AP at IoU 0.70 is approximately
+0.0003282\% in both outputs.
+
+\subsection{IoU 0.25: Modest Improvements}
+Car improves by 0.2673 pp, motorcycle by 2.3087 pp, and pedestrian by
+0.0744 pp. This relatively permissive overlap threshold already accepts
+many baseline predictions. The observed refinement gains are therefore
+smaller than those at IoU 0.50.
+
+\subsection{IoU 0.50: Clear Gains for Car and Motorcycle}
+Car AP increases from 49.2058\% to 61.7406\%, a gain of 12.5347 pp.
+Motorcycle AP increases from 0.5390\% to 27.1301\%, a gain of 26.5910 pp.
+These are the strongest improvements in the experiment. Pedestrian AP
+decreases from 1.0271\% to 0.0957\%, a change of $-0.9315$ pp, indicating
+the need for class-specific investigation.
+
+\subsection{IoU 0.70: High-Overlap Accuracy Remains Limited}
+Car AP increases from 2.2945\% to 4.9270\%; motorcycle AP rises to
+0.5577\%; pedestrian AP remains unchanged. Overall mAP increases from
+0.7649\% to 1.8283\% but remains low. Many refined boxes still fail a
+strict geometric-overlap requirement. The aggregate results do not
+identify whether the remaining errors primarily involve Z, dimensions,
+yaw, or annotation conventions. Inspection of corresponding boxes and
+point-cloud crops is required.
+
+\section{Geometry Errors and Center-Distance AP}
+\begin{table}[H]
+\centering
+\small
+\caption{Errors from the center-distance evaluator; lower is better.
+ATE is in meters, ASE is dimensionless, and AOE is in radians.}
+\label{tab:errors}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{lrrrrrr}
+\toprule
+& \multicolumn{2}{c}{ATE} & \multicolumn{2}{c}{ASE} & \multicolumn{2}{c}{AOE} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+Class & Before & After & Before & After & Before & After \\
+\midrule
+Car (incl. truck) & 0.2954 & 0.2903 & 0.3208 & 0.2631 & 0.0716 & 0.0585 \\
+Motorcycle & 0.1732 & 0.1731 & 0.5509 & 0.1826 & 0.3864 & 0.2884 \\
+Pedestrian & 0.3387 & 0.3389 & 0.3505 & 0.4621 & 1.0140 & 0.9803 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Center-distance mAP increases only from 53.9100\% to 54.0774\%
+($+0.1674$ pp), whereas 3D IoU mAP at 0.50 improves by 12.7314 pp.
+The two metrics use different matching criteria and AP integration
+policies, so their absolute values should not be directly compared.
+
+Motorcycle ATE is nearly unchanged, while ASE decreases from 0.5509 to
+0.1826 and AOE decreases from 0.3864 to 0.2884 rad. This is consistent
+with improved box geometry despite minimal changes in center position.
+Car improves in all three errors. Pedestrian ASE increases from 0.3505
+to 0.4621, consistent with its lower AP at IoU 0.50. The TP sets used
+for error calculation can differ between outputs; this is not a
+fixed-pair box analysis.
+
+\section{True Positives, False Positives, and False Negatives}
+\begin{table}[H]
+\centering
+\small
+\caption{3D IoU counts over all candidates after class and range filtering.}
+\label{tab:counts}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{rlrrrrrr}
+\toprule
+& & \multicolumn{2}{c}{TP} & \multicolumn{2}{c}{FP} & \multicolumn{2}{c}{FN} \\
+\cmidrule(lr){3-4}\cmidrule(lr){5-6}\cmidrule(lr){7-8}
+IoU & Class & Before & After & Before & After & Before & After \\
+\midrule
+0.25 & Car (incl. truck) & 4511 & 4520 & 4297 & 4286 & 362 & 353 \\
+0.25 & Motorcycle & 1879 & 1917 & 771 & 733 & 613 & 575 \\
+0.25 & Pedestrian & 205 & 206 & 6831 & 6830 & 315 & 314 \\
+\midrule
+0.50 & Car (incl. truck) & 2978 & 3411 & 5830 & 5395 & 1895 & 1462 \\
+0.50 & Motorcycle & 171 & 947 & 2479 & 1703 & 2321 & 1545 \\
+0.50 & Pedestrian & 67 & 38 & 6969 & 6998 & 453 & 482 \\
+\midrule
+0.70 & Car (incl. truck) & 517 & 795 & 8291 & 8011 & 4356 & 4078 \\
+0.70 & Motorcycle & 1 & 112 & 2649 & 2538 & 2491 & 2380 \\
+0.70 & Pedestrian & 1 & 1 & 7035 & 7035 & 519 & 519 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At IoU 0.50, car gains 433 TP and motorcycle gains 776 TP, while pedestrian
+loses 29 TP. Lower FP counts for car and motorcycle are consistent with
+candidates becoming TP after better geometric alignment; they do not
+establish that the pipeline removed false detections. Motorcycle and
+pedestrian candidate counts remain unchanged. Car has two fewer
+candidates after range filtering. The reason for this small difference
+must be verified from the prediction JSON files rather than inferred
+from counts alone.
+
+\section{Conclusions and Follow-Up Experiments}
+\begin{itemize}
+\item On this VF adapted dataset, the output after DetZero substantially
+improves car and motorcycle 3D IoU AP, especially at IoU 0.50.
+\item Pedestrian does not improve consistently: AP decreases at IoU 0.50
+and dimension error increases. Its refinement branch should be inspected
+separately.
+\item Geometric improvements can be measured without CRM. These results
+do not demonstrate confidence recalibration.
+\item Evaluate tracking-only, tracking+GRM, and tracking+GRM+PRM separately
+under the same protocol to isolate module and postprocessing effects.
+\item For confidence-threshold experiments, apply the same output filtering
+policy to baseline and refined predictions, while distinguishing the
+tracking/refinement input threshold from the output confidence threshold.
+\end{itemize}
+
+\section{Limitations and Data Provenance}
+This report is generated from the comparison JSON supplied by the user,
+not from a new inference run. The accompanying
+\texttt{run\_report.json} was not supplied to verify checkpoint identities,
+processed/fallback track counts, size policy, Z policy, or the run's input
+threshold. Improvements or regressions therefore cannot yet be attributed
+to GRM or PRM individually.
+
+The custom 3D IoU metric uses confidence-ordered greedy matching and
+full-recall AP. DetZero's original Waymo evaluation uses the Waymo metric
+implementation with Hungarian matching. The numbers here must not be
+called official Waymo mAP/mAPH. NDS is not reported because the VF
+protocol does not evaluate velocity or attributes. GT LiDAR point counts
+come from partner metadata and are not recomputed by the evaluator.
+Results on 156 frames do not establish generalization to other scenes.
+
+Prediction JSON identifiers recorded in the source comparison:
+\begin{itemize}
+\item Baseline SHA-256:
+{\footnotesize\ttfamily\seqsplit{d234e5da6e84cb3196911d70555d0ba0d3a4f3e0c6e042764e3fd8de9eded4ec}}.
+\item Refined SHA-256:
+{\footnotesize\ttfamily\seqsplit{16518e1f072b634ceab10c4130fbcf3842fa1ff3d9764e30ad2f96b2051bf521}}.
+\end{itemize}
+
+\end{document}
