@@ -471,6 +471,232 @@ Runner áp dụng cho data VF đã chuyển sang nuScenes `v1.0-mini`, một sce
 có calibration/pose thật và GT cho ba nhóm đánh giá. Các bước chuẩn bị raw
 data hoặc dataset nhiều scene/version khác chưa được tự động hóa trong lệnh này.
 
+## 10. Chạy PCD LiDAR-only rồi đưa qua DetZero
+
+Luồng này dành riêng cho dữ liệu
+`data/data_test_only_lidar/20260916_134800_lidar` và checkpoint
+`pretrained/lidar-only-det.pth`. Runner mới đọc PCD binary trực tiếp, chuyển
+mỗi point từ `x y z intensity` thành năm feature
+`x y z intensity time_lag`, với `time_lag=0`, chạy đúng config LiDAR-only,
+xuất detection sang world frame, rồi chạy DetZero tracking + GRM + PRM.
+Pipeline này không nạp hoặc chạy CRM.
+
+Dữ liệu hiện có 204 frame, khoảng 20 Hz. Field intensity bằng 0 trên các frame
+đã kiểm tra. Inference vẫn chạy nhưng bị domain shift so với nuScenes. Không
+ghép multisweep; detector chạy từng frame độc lập.
+
+File `data/data_test_only_lidar/trajectory_optimized.tum` có 497 pose khoảng
+5 Hz và phủ toàn bộ timestamp PCD. Runner đọc chuẩn TUM
+`timestamp tx ty tz qx qy qz qw`, coi mỗi pose là `T_world_lidar`, nội suy
+translation tuyến tính và quaternion SLERP sang 20 Hz. Sai lệch timestamp tới
+pose nguồn gần nhất trên data hiện tại tối đa khoảng 0.10004 giây, dưới giới
+hạn mặc định `--max-pose-gap 0.11`. Calibration LiDAR-to-ego được đặt identity
+vì trajectory được hiểu là pose của chính LiDAR. Chỉ dùng
+`--invert-trajectory` nếu nguồn tạo TUM xác nhận file lưu `T_lidar_world`.
+
+Không có ground truth 3D nên `comparison.json` chỉ đo box thay đổi bao nhiêu;
+**không thể kết luận AP hay accuracy tốt hơn**. Có trajectory giúp PRM chạy
+trong world frame nhất quán, nhưng không thay thế label đánh giá.
+
+### 10.1 Push code từ máy hiện tại
+
+Chạy trên máy hiện tại, ngoài Docker. Worktree có thể chứa thay đổi khác, nên
+chỉ stage bốn file của pipeline này; không dùng `git add .`:
+
+```bash
+cd /Users/khanhhuy/bevfusion
+git status --short
+git branch --show-current
+git add \
+  docs/README_RTX5060_DOCKER.md \
+  tools/pcd_lidar_utils.py \
+  tools/run_pcd_lidar_detzero.py \
+  tests/test_pcd_lidar_pipeline.py
+git diff --cached --check
+git diff --cached --stat
+git commit -m "Add PCD LiDAR to DetZero pipeline with TUM poses"
+git push origin HEAD
+```
+
+Data, detector checkpoint và sáu checkpoint DetZero thường bị gitignore hoặc
+quá lớn để push cùng code. Chúng phải tồn tại riêng trên máy công ty tại đúng
+các đường dẫn dùng ở bước preflight.
+
+### 10.2 Pull code trên máy công ty và mở Docker
+
+Trên Terminal Ubuntu, ngoài container:
+
+```bash
+cd /home/khanhhuy/bevfusion
+git status --short
+git switch fix/nuscenes-mini-depth-lss
+git pull --ff-only origin fix/nuscenes-mini-depth-lss
+```
+
+Các lệnh trên dùng branch hiện tại của lần sửa này là
+`fix/nuscenes-mini-depth-lss`. Nếu trước khi push bạn chủ động đổi branch, dùng
+tên branch mới ở cả hai lệnh. Nếu `git status --short` trên máy công ty có thay
+đổi local, dừng và commit/stash đúng phần đó trước; không reset hoặc ghi đè chúng.
+
+Đây là thay đổi Python/test/tài liệu, không sửa CUDA extension hay dependency;
+container `bevfusion-detection` hiện có không cần rebuild image. Nếu container
+đang chạy:
+
+```bash
+sudo docker exec -it bevfusion-detection /bin/bash
+```
+
+Nếu đã dừng:
+
+```bash
+sudo docker start -ai bevfusion-detection
+```
+
+Các lệnh còn lại trong mục này chạy **bên trong container**:
+
+```bash
+cd /workspace/bevfusion
+export PATH="/opt/venv/bin:$PATH"
+export PYTHONPATH=/workspace/bevfusion
+export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
+```
+
+### 10.3 Preflight data, pose, checkpoint và test
+
+```bash
+cd /workspace/bevfusion
+test -f pretrained/lidar-only-det.pth
+test -f data/data_test_only_lidar/trajectory_optimized.tum
+for detzero_class in vehicle pedestrian cyclist; do
+  for detzero_stage in grm prm; do
+    test -f "DetZero-main-2/checkpoints/${detzero_class}_${detzero_stage}_model.pth" || exit 1
+  done
+done
+find data/data_test_only_lidar -name '*.pcd' | wc -l
+python -m pytest tests/test_pcd_lidar_pipeline.py tests/test_bev_detzero_integration.py -q
+```
+
+Kỳ vọng có 204 PCD, sáu checkpoint GRM/PRM và test pass. Test thực tế local đã
+nạp strict cả sáu checkpoint và forward CPU thành công. Kiểm tra timestamp/pose
+trước khi chạy GPU:
+
+```bash
+python - <<'PY'
+from pathlib import Path
+from tools.pcd_lidar_utils import read_binary_pcd, read_tum_trajectory, interpolate_tum_pose
+pcds = sorted(Path('data/data_test_only_lidar').rglob('*.pcd'))
+trajectory = read_tum_trajectory('data/data_test_only_lidar/trajectory_optimized.tum')
+gaps = []
+for path in pcds:
+    _, meta = read_binary_pcd(path)
+    gaps.append(interpolate_tum_pose(trajectory, meta['timestamp'])['nearest_gap'])
+print('PCD frames:', len(pcds))
+print('Trajectory poses:', len(trajectory['timestamps']))
+print('Max nearest pose gap (s):', max(gaps))
+PY
+```
+
+Kỳ vọng `PCD frames: 204`, `Trajectory poses: 497`, gap tối đa xấp xỉ
+`0.10004` giây.
+
+### 10.4 Chạy 3 frame kiểm tra GPU và full GRM/PRM
+
+Output phải là thư mục mới hoặc rỗng để không ghi đè run cũ:
+
+```bash
+test ! -e outputs/pcd-pretrained-smoke-3
+python tools/run_pcd_lidar_detzero.py \
+  --pcd-dir data/data_test_only_lidar \
+  --trajectory data/data_test_only_lidar/trajectory_optimized.tum \
+  --checkpoint pretrained/lidar-only-det.pth \
+  --detzero-checkpoint-dir DetZero-main-2/checkpoints \
+  --output-dir outputs/pcd-pretrained-smoke-3 \
+  --max-frames 3 \
+  --score-threshold 0.2 \
+  --detzero-refinement full \
+  2>&1 | tee outputs/pcd-pretrained-smoke-3.log
+```
+
+Smoke detector cũ trên cùng ba frame/checkpoint cho 44, 42 và 43 detection ở
+ngưỡng 0.2; sau warm-up khoảng 892 ms, hai frame tiếp theo khoảng 66--67 ms.
+Kiểm tra bridge local với các detection đó và trajectory thật đã tạo 42 track,
+thay 124/129 box matched, chạy full GRM/PRM cho 37 track; 5 track thiếu point.
+Đây là kiểm tra thực thi, không phải metric accuracy.
+
+Xem nhanh kết quả smoke:
+
+```bash
+python -m json.tool outputs/pcd-pretrained-smoke-3/comparison.json
+python - <<'PY'
+import json
+p='outputs/pcd-pretrained-smoke-3/detzero/run_report.json'
+r=json.load(open(p))
+for key in ['frames','tracks','matched_boxes_replaced','status_counts','grm_counts','prm_counts','coordinate_mode']:
+    print(key, r[key])
+PY
+```
+
+`coordinate_mode` phải là `global`; log phải có dòng checkpoint GRM/PRM
+`all model keys matched`. Runner này không có bước CRM.
+
+### 10.5 Chạy đủ 204 frame
+
+```bash
+test ! -e outputs/pcd-pretrained-smoke
+python tools/run_pcd_lidar_detzero.py \
+  --pcd-dir data/data_test_only_lidar \
+  --trajectory data/data_test_only_lidar/trajectory_optimized.tum \
+  --checkpoint pretrained/lidar-only-det.pth \
+  --detzero-checkpoint-dir DetZero-main-2/checkpoints \
+  --output-dir outputs/pcd-pretrained-smoke \
+  --score-threshold 0.2 \
+  --detzero-refinement full \
+  2>&1 | tee outputs/pcd-pretrained-smoke.log
+```
+
+Không thêm `--max-frames` nghĩa là chạy tất cả frame. Runner dùng single-frame
+BEVFusion, association DetZero trên CPU, GRM/PRM trên `cuda:0` và pose nội suy
+từ TUM. Dùng `--no-bev` nếu không cần 204 PNG. Không thêm `--stride 2` cho lần
+đầu; giữ đủ 20 Hz và timestamp thật để tracking/refining có toàn bộ chuỗi.
+
+Output:
+
+```text
+pcd-pretrained-smoke/
+├── baseline/
+│   ├── predictions/*.json
+│   ├── bev/*.png
+│   ├── results_nusc.json
+│   └── summary.json
+├── dataset/                       # .bin 5-float + bảng tối thiểu cho bridge
+├── detzero/
+│   ├── results_nusc_detzero_refined.json
+│   ├── results_nusc_detzero_tracking.json
+│   ├── tracks.pkl
+│   └── run_report.json
+├── logs/detzero.log
+├── comparison.json
+└── run_arguments.json
+```
+
+Container hiện tại chỉ bind mount `/home/khanhhuy/bevfusion` vào
+`/workspace/bevfusion`, vì vậy output bền vững trước hết nằm ở
+`/home/khanhhuy/bevfusion/outputs/pcd-pretrained-smoke` trên host Ubuntu.
+Nếu muốn đúng layout repository adapter như trên Mac, copy sau khi run hoàn
+tất, không copy khi process đang ghi file:
+
+```bash
+mkdir -p /home/khanhhuy/bevfusion-adapter/runs
+test ! -e /home/khanhhuy/bevfusion-adapter/runs/pcd-pretrained-smoke
+cp -a /home/khanhhuy/bevfusion/outputs/pcd-pretrained-smoke \
+  /home/khanhhuy/bevfusion-adapter/runs/pcd-pretrained-smoke
+```
+
+Khi đó layout host tương ứng với ví dụ Mac
+`/Users/khanhhuy/bevfusion-adapter/runs/pcd-pretrained-smoke`. Không dùng
+`results_nusc_detzero_refined.json` như bằng chứng cải thiện nếu chưa có GT;
+xem `comparison.json`, `detzero/run_report.json` và preview BEV để chẩn đoán.
+
 ## Nguồn tham khảo
 
 - [Docker Engine trên Ubuntu](https://docs.docker.com/engine/install/ubuntu/)
